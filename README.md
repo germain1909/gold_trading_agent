@@ -9,10 +9,12 @@ trading agent v1
 
 # Setup
 python3.10 -m venv ~/venvs/py310
+
 source ~/venvs/py310/bin/activate
 
 # bootstrap/upgrade pip inside the venv
 python -m ensurepip --upgrade
+
 python -m pip install --upgrade pip
 
 # confirm
