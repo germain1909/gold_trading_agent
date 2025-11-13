@@ -7,7 +7,7 @@ trading agent v1
 
 
 
-#Setup
+# Setup
 python3.10 -m venv ~/venvs/py310
 source ~/venvs/py310/bin/activate
 
