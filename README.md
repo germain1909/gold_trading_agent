@@ -2,7 +2,9 @@
 trading agent v1
 
 Have to add a .env file in the root directory 
+
 GOOGLE_API_KEY=***********
+
 GOOGLE_GENAI_USE_VERTEXAI=FALSE
 
 # below is how you run it
