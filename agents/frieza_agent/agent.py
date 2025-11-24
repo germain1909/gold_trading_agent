@@ -7,6 +7,8 @@ load_dotenv() # automatically finds .env file
 # 🔐 Hard-code your API key temporarily for local testing
 # os.environ["GOOGLE_API_KEY"] = ""
 # os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "FALSE"
+GOOGLE_GENAI_USE_VERTEXAI = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "FALSE")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 
 agent = LlmAgent(
