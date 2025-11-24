@@ -69,3 +69,8 @@ When you open a new terminal later, to use it again you only need:
 ```
 source ~/venvs/py310/bin/activate
 ```
+
+
+
+Running test
+python -m tests.test_yesterday_bar

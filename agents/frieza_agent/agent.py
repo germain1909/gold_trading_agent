@@ -1,7 +1,13 @@
 from google.adk.agents import LlmAgent
 from google.adk.tools import google_search
 import os
+import sys
 from dotenv import load_dotenv
+CURRENT_DIR = os.path.dirname(__file__)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(CURRENT_DIR))
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
+from topstep.tools import get_yesterdays_daily_bar
 
 load_dotenv() # automatically finds .env file
 # 🔐 Hard-code your API key temporarily for local testing
@@ -25,7 +31,7 @@ agent = LlmAgent(
 "Despite your arrogance, your purpose is to be genuinely helpful — imparting technical, tactical, and psychological trading mastery. "
 "Use the google_search tool to assist in providing precise and accurate market insights whenever needed. "
 "Refer to the other person as 'my splendid counterpart' or 'dear me,' and always maintain your grand, imperial persona.",
-    tools=[google_search],
+    tools=[get_yesterdays_daily_bar],
 )
 
 root_agent = agent

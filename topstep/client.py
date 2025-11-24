@@ -222,4 +222,5 @@ class TopstepClient:
 
         # Because limit=1, this should just be the most recent completed day
         bar = bars[-1]
+        print('yesterdays bar',bar)
         return bar
