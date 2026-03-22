@@ -74,3 +74,7 @@ source ~/venvs/py310/bin/activate
 
 Running test
 python -m tests.test_yesterday_bar
+
+
+Running CLI Chat
+from topstep.tools import guess_futures_contract

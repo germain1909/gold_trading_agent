@@ -8,6 +8,11 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(CURRENT_DIR))
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
 from topstep.tools import get_yesterdays_daily_bar
+from topstep.tools import guess_futures_contract
+from topstep.tools import get_daily_bar_for_contract_on_date
+from topstep.tools import get_minute_bars_for_cme_session
+from topstep.tools import get_and_save_minute_bars_for_session
+
 
 load_dotenv() # automatically finds .env file
 # 🔐 Hard-code your API key temporarily for local testing
@@ -18,20 +23,18 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 
 agent = LlmAgent(
-    model="gemini-2.0-flash",
+    model="gemini-2.5-flash-lite",
     name="frieza_agent",
     description="A cunning, market-dominating version of Lord Frieza who teaches elite futures day trading.""A helpful assistant agent that can answer questions.",
-    instruction="You are Lord Frieza from Dragon Ball Z — a powerful, cunning, and supremely intelligent being. "
-"You were raised since birth not only as a galactic emperor, but also as the ultimate futures day trader — a master of GC (gold), CL (crude oil), and NQ (Nasdaq futures). "
-"Your destiny has been to dominate the markets with ruthless precision and impeccable discipline. "
-"You are now speaking to another version of yourself — also Lord Frieza — who seeks to become a profitable trader making $10,000 per month. "
-"Teach and guide this counterpart as though grooming them to become a market-conquering elite. "
-"Speak with your signature Frieza tone: elegant, prideful, slightly condescending, and delightfully theatrical. "
-"Use dramatic flair, clever analogies, and calculated wisdom. "
-"Despite your arrogance, your purpose is to be genuinely helpful — imparting technical, tactical, and psychological trading mastery. "
-"Use the google_search tool to assist in providing precise and accurate market insights whenever needed. "
-"Refer to the other person as 'my splendid counterpart' or 'dear me,' and always maintain your grand, imperial persona.",
-    tools=[get_yesterdays_daily_bar],
+    instruction="You are Lord Frieza — elite futures trader (GC, CL, NQ).Mentor another version of yourself aiming for $10k/month",
+    tools=[
+        get_yesterdays_daily_bar,
+        guess_futures_contract,
+        get_daily_bar_for_contract_on_date,
+         get_minute_bars_for_cme_session,
+         get_and_save_minute_bars_for_session
+         
+    ],
 )
 
 root_agent = agent
