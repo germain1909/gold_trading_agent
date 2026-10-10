@@ -196,6 +196,7 @@ def simulate_setups(candles, levels, minute_bars, start):
     closes = [b["c"] for b in candles]
     ema_l, basis, atr_v = ema_line(closes), bb_basis(closes), atr(candles)
     exit_line = {b["t"]: e for b, e in zip(candles, ema_l)}
+    level_prices = [lv["price"] for lv in levels]
 
     signals = trend_cross_signals(candles, ema_l, basis, CANDLE_MINUTES, levels, cfg, atr_v) + \
         stretched_rejection_signals(candles, ema_l, basis, atr_v, levels, CANDLE_MINUTES, cfg)
@@ -205,6 +206,7 @@ def simulate_setups(candles, levels, minute_bars, start):
     signals.sort(key=lambda s: (s["entry_time"], s["setup"]))
 
     print(f"\n{BOLD}Trades - 2 setups, max {cfg.trades_per_session} per session, one position at a time, "
+          f"{'LOCK AND ROLL ON (buffer ' + format(cfg.lock_buffer_pts, 'g') + ' pts), ' if cfg.lock_roll else ''}"
           f"{cfg.min_contracts}-{cfg.max_contracts} {cfg.contract}, max risk ${cfg.max_risk_per_trade:,.0f}/trade{RESET}")
     print(f"{DIM}  trend cross: close beyond EMA {EMA_LENGTH} (SMA {EMA_SMOOTHING}) and BB basis (EMA {BB_LENGTH}), "
           f"stop beyond lines + {cfg.stop_buffer_pts:g}, target first level >= {cfg.min_rr}R, "
@@ -241,9 +243,9 @@ def simulate_setups(candles, levels, minute_bars, start):
             entry_iso = sig["entry_time"].isoformat()
             if sig["setup"] == "trend cross":
                 after = candles[sig["i"] + 1:]
-                res = simulate_trail(plan, minute_bars, after, exit_line, cfg)
+                res = simulate_trail(plan, minute_bars, after, exit_line, cfg, level_prices)
             else:
-                res = simulate(plan, [b for b in minute_bars if b["t"] >= entry_iso], cfg)
+                res = simulate(plan, [b for b in minute_bars if b["t"] >= entry_iso], cfg, level_prices)
             if res["exit"] is None:
                 print(f"  {DIM}{tag} - skipped: no price data after entry{RESET}")
                 continue
@@ -259,6 +261,8 @@ def simulate_setups(candles, levels, minute_bars, start):
                   f"{plan['contract']}{RESET} ({sig['detail']})")
             print(f"        entry {px(plan['entry'])}  stop {px(plan['stop'])} ({px(plan['risk_pts'])} pts, "
                   f"-${plan['risk_usd']:,.0f})  {target}")
+            for note in res.get("notes", []):
+                print(f"        {DIM}{note}{RESET}")
             print(f"        {color}{BOLD}{res['how'].upper()} at {px(res['exit'])} ({exit_at}): "
                   f"{'+' if res['pnl_pts'] >= 0 else ''}{px(res['pnl_pts'])} pts = "
                   f"{'+' if res['pnl_usd'] >= 0 else '-'}${abs(res['pnl_usd']):,.0f}{RESET}")

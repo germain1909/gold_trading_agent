@@ -17,6 +17,7 @@ All settings can be overridden with environment variables (see RiskConfig).
 import math
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 
@@ -38,6 +39,11 @@ class RiskConfig:
     daily_loss_limit: float = _env("RISK_DAILY_LOSS_LIMIT", 1000)   # 50K combine
     trailing_drawdown: float = _env("RISK_TRAILING_DRAWDOWN", 2000)  # 50K combine
     trades_per_session: int = int(_env("RISK_TRADES_PER_SESSION", 2))
+    # Lock and roll: at the target, don't exit - lock the stop just behind the
+    # target; if the candle closes beyond it, ride to the next level.
+    lock_roll: bool = os.getenv("RISK_LOCK_ROLL", "false").lower() == "true"
+    lock_buffer_pts: float = _env("RISK_LOCK_BUFFER", 5.0)
+    candle_minutes: int = int(_env("DESK_CANDLE_MINUTES", 30))
 
 
 def round_to_tick(price: float, tick: float, up: bool) -> float:
@@ -125,21 +131,118 @@ def plan_trade(
     return plan
 
 
-def simulate(plan: Dict[str, Any], bars_after: List[Dict[str, Any]], cfg: Optional[RiskConfig] = None) -> Dict[str, Any]:
+def _bucket(t_iso: str, minutes: int) -> int:
+    return int(datetime.fromisoformat(t_iso).timestamp() // (minutes * 60))
+
+
+def _result(plan: Dict[str, Any], exit_price: float, how: str, when: str, cfg: RiskConfig,
+            notes: Optional[List[str]] = None) -> Dict[str, Any]:
+    short = plan["side"] == "short"
+    pnl_pts = (plan["entry"] - exit_price) if short else (exit_price - plan["entry"])
+    return {"exit": exit_price, "how": how, "exit_time": when, "pnl_pts": pnl_pts,
+            "pnl_usd": pnl_pts * cfg.point_value * plan["contracts"], "notes": notes or []}
+
+
+def lock_and_roll(plan: Dict[str, Any], bars: List[Dict[str, Any]], levels: List[float],
+                  cfg: Optional[RiskConfig] = None) -> Dict[str, Any]:
+    """
+    Manage a trade from the 1-minute bar that first touched its target.
+
+    At the touch the stop moves to just behind the target (lock_buffer_pts).
+    When that 30m candle closes:
+      - closed back inside the level -> exit at the close (the level held)
+      - closed beyond it             -> stay in: stop just behind the nearest
+                                        broken level, target the next level
+    Repeats at each new target. With no next level, exits at the close.
+
+    On the bar that touches a target, price came from the stop side, so that
+    bar's extreme behind the target most likely happened before the touch.
+    That bar is judged by its close: stopped only if it closed behind the lock.
+    """
+    cfg = cfg or RiskConfig()
+    short = plan["side"] == "short"
+    buf = cfg.lock_buffer_pts
+    target = plan["target"]
+    stop = target + buf if short else target - buf
+    notes = []
+
+    def t_hm(b):
+        return datetime.fromisoformat(b["t"]).astimezone().strftime("%H:%M")
+
+    def p(x):
+        return f"{x:.2f}".rstrip("0").rstrip(".")
+
+    i = 0
+    notes.append(f"touched target {p(target)} at {t_hm(bars[0])}, stop locked at {p(stop)}")
+    while True:
+        # Finish the 30m candle in which the target was touched
+        bucket = _bucket(bars[i]["t"], cfg.candle_minutes)
+        j, last = i, None
+        while j < len(bars) and _bucket(bars[j]["t"], cfg.candle_minutes) == bucket:
+            b = bars[j]
+            behind = (b["c"] >= stop if short else b["c"] <= stop) if j == i else \
+                ((b["h"] >= stop) if short else (b["l"] <= stop))
+            if behind:
+                return _result(plan, stop, "locked stop", b["t"], cfg, notes)
+            last = b
+            j += 1
+        if j >= len(bars):
+            return _result(plan, last["c"], "time", last["t"], cfg, notes)
+        close = last["c"]
+        beyond = close < target if short else close > target
+        if not beyond:
+            notes.append(f"candle closed {p(close)}, back inside {p(target)} - level held")
+            return _result(plan, close, "level held", last["t"], cfg, notes)
+
+        # Level accepted: stop behind the nearest broken level, target the next one
+        if short:
+            broken = [p for p in levels if p > close and p <= target]
+            ahead = sorted((p for p in levels if p < close - cfg.min_target_pts), reverse=True)
+            stop = min(broken) + buf
+        else:
+            broken = [p for p in levels if p < close and p >= target]
+            ahead = sorted(p for p in levels if p > close + cfg.min_target_pts)
+            stop = max(broken) - buf
+        if not ahead:
+            notes.append(f"candle closed {p(close)} beyond {p(target)}, no next level - exit")
+            return _result(plan, close, "rolled - no next level", last["t"], cfg, notes)
+        target = ahead[0]
+        notes.append(f"candle closed {p(close)} beyond the level - rolled: stop {p(stop)}, target {p(target)}")
+
+        # Ride toward the next level
+        while j < len(bars):
+            b = bars[j]
+            if (b["h"] >= stop) if short else (b["l"] <= stop):
+                return _result(plan, stop, "rolled stop", b["t"], cfg, notes)
+            if (b["l"] <= target) if short else (b["h"] >= target):
+                stop = target + buf if short else target - buf
+                notes.append(f"touched {p(target)} at {t_hm(b)}, stop locked at {p(stop)}")
+                i = j
+                break
+            j += 1
+        else:
+            return _result(plan, bars[-1]["c"], "time", bars[-1]["t"], cfg, notes)
+
+
+def simulate(plan: Dict[str, Any], bars_after: List[Dict[str, Any]], cfg: Optional[RiskConfig] = None,
+             levels: Optional[List[float]] = None) -> Dict[str, Any]:
     """
     Walk 1-minute bars after entry to see whether stop or target was hit first.
     If a single bar touches both, assume the stop was hit (conservative).
     If neither is hit, exit at the last bar's close.
+    With cfg.lock_roll and levels, a target touch hands over to lock_and_roll.
     """
     cfg = cfg or RiskConfig()
     short = plan["side"] == "short"
-    for b in bars_after:
+    for k, b in enumerate(bars_after):
         hit_stop = b["h"] >= plan["stop"] if short else b["l"] <= plan["stop"]
         hit_target = b["l"] <= plan["target"] if short else b["h"] >= plan["target"]
         if hit_stop:
             exit_price, how = plan["stop"], "stop"
             break
         if hit_target:
+            if cfg.lock_roll and levels:
+                return lock_and_roll(plan, bars_after[k:], levels, cfg)
             exit_price, how = plan["target"], "target"
             break
     else:
@@ -189,6 +292,7 @@ def simulate_trail(
     candles: List[Dict[str, Any]],
     exit_line: Dict[str, Optional[float]],
     cfg: Optional[RiskConfig] = None,
+    levels: Optional[List[float]] = None,
 ) -> Dict[str, Any]:
     """
     Ride a trade until it hits its level target, its hard stop (both checked on
@@ -208,6 +312,8 @@ def simulate_trail(
                 exit_price, how, when = plan["stop"], "stop", b["t"]
                 break
             if target is not None and ((b["l"] <= target) if short else (b["h"] >= target)):
+                if cfg.lock_roll and levels:
+                    return lock_and_roll(plan, [m for m in minute_bars if m["t"] >= b["t"]], levels, cfg)
                 exit_price, how, when = target, "target", b["t"]
                 break
         if how:

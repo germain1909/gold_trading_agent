@@ -3,7 +3,7 @@ Stop / target / sizing rules and stop-vs-target simulation.
 
 Run: python -m tests.test_risk   (or pytest, if installed)
 """
-from desk.risk import RiskConfig, plan_trade, simulate
+from desk.risk import RiskConfig, plan_trade, simulate, lock_and_roll
 
 CFG = RiskConfig(point_value=2.0, min_contracts=2, max_contracts=3, max_risk_per_trade=250,
                  stop_buffer_pts=2.0, min_rr=1.5, min_target_pts=10.0)
@@ -77,6 +77,47 @@ def test_simulate_target_and_time_exit():
     assert simulate(plan, bars, CFG)["how"] == "target"
     r = simulate(plan, bars[:1], CFG)
     assert r["how"] == "time" and r["pnl_pts"] == 4
+
+
+ROLL = RiskConfig(point_value=2.0, min_contracts=1, max_contracts=3, max_risk_per_trade=250,
+                  stop_buffer_pts=2.0, min_rr=1.5, min_target_pts=10.0, lock_roll=True,
+                  lock_buffer_pts=5.0, candle_minutes=30)
+
+
+def m(minute, o, h, l, c):
+    return {"t": f"2026-10-09T14:{minute:02d}:00+00:00", "o": o, "h": h, "l": l, "c": c}
+
+
+def test_lock_and_roll_level_held_exits_near_target():
+    # Short to 100: touches at 14:05, bounces back above the 105 lock -> locked stop
+    plan = {"side": "short", "entry": 150, "stop": 160, "target": 100, "contracts": 3}
+    bars = [m(5, 103, 104, 99, 101), m(6, 101, 107, 100, 106)]
+    r = lock_and_roll(plan, bars, [100, 60], ROLL)
+    assert r["how"] == "locked stop" and r["exit"] == 105 and r["pnl_usd"] == 45 * 2 * 3
+
+
+def test_lock_and_roll_touch_bar_judged_by_close():
+    # Touch bar spans 99-108 (came down from above) but closes at 99: not stopped
+    plan = {"side": "short", "entry": 150, "stop": 160, "target": 100, "contracts": 1}
+    bars = [m(5, 108, 108, 99, 99), m(29, 99, 101, 95, 96), m(30, 96, 97, 59, 60)]
+    r = lock_and_roll(plan, bars, [100, 60], ROLL)
+    # 14:00-14:30 candle closes 96 beyond 100 -> roll to 60, which is hit at 14:30
+    assert r["how"] != "locked stop"
+    assert any("rolled" in n for n in r["notes"])
+
+
+def test_lock_and_roll_rolls_to_next_level():
+    plan = {"side": "long", "entry": 50, "stop": 40, "target": 100, "contracts": 2}
+    bars = [m(10, 99, 101, 98, 100.5), m(29, 100.5, 112, 100, 111),       # candle closes 111 > 100
+            m(30, 111, 141, 110, 140), m(31, 140, 141, 120, 121)]        # touches 140, falls back
+    r = lock_and_roll(plan, bars, [100, 140], ROLL)
+    assert r["how"] == "locked stop" and r["exit"] == 135 and r["pnl_pts"] == 85
+
+
+def test_lock_roll_off_takes_target():
+    plan = {"side": "long", "entry": 100, "stop": 90, "target": 120, "contracts": 2}
+    bars = [{"t": "t1", "o": 100, "h": 121, "l": 99, "c": 120}]
+    assert simulate(plan, bars, CFG, [120, 150])["how"] == "target"
 
 
 if __name__ == "__main__":
