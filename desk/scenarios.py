@@ -20,10 +20,13 @@ TYPES = {
     "retest": "E. Break and retest",
     "trap": "F. Failed breakout",
     "trend_turn": "G. Trend turn",
+    "continuation_ema": "H1. Continuation - pullback to the EMA",
+    "continuation_pause": "H2. Continuation - pause and break",
 }
 SESSIONS = {"Asia", "London", "NY", "any"}
 SESSION_END = {"Asia": "03:00", "London": "09:30", "NY": "15:30", "any": None}
-NEEDS_LEVEL = set(TYPES) - {"trend_turn"}
+NO_LEVEL = {"trend_turn", "continuation_ema", "continuation_pause"}
+NEEDS_LEVEL = set(TYPES) - NO_LEVEL
 REJECTION_TYPES = {"fade", "pullback", "retest"}
 
 Level = Union[str, float, int]
@@ -216,6 +219,10 @@ def describe(sc: Scenario, levels: Optional[Dict[str, float]] = None) -> str:
         "trap": f"breaks {'below' if up else 'above'} {L}, then closes back inside within 2 candles",
         "trend_turn": "closes beyond both the EMA line and BB basis after 3+ candles on the other side "
                       "(or with a 1.5 ATR breakout candle)",
+        "continuation_ema": f"trending {'up' if up else 'down'}, a candle pulls back to the EMA line and closes "
+                            f"back {'above' if up else 'below'} it",
+        "continuation_pause": f"trending {'up' if up else 'down'}, a pause of 2-4 candles (combined range at most "
+                              f"one 30m ATR), then a candle closes beyond the pause's {'high' if up else 'low'}",
     }[sc.type]
     lines.append(f"  Trigger: {trig}")
     lines.append("  Entry: the trigger candle's close")
@@ -232,6 +239,8 @@ def describe(sc: Scenario, levels: Optional[Dict[str, float]] = None) -> str:
             "breakout": "back inside the level past the breakout candle's midpoint (2 pts)",
             "trap": f"beyond the failed break's {'low' if up else 'high'} (2 pts)",
             "trend_turn": "beyond the farther of the two lines (+2 pts)",
+            "continuation_ema": "beyond the pullback candle's wick (+2 pts)",
+            "continuation_pause": f"the other side of the pause ({'below its low' if up else 'above its high'}, 2 pts)",
         }[sc.type]
     lines.append(f"  Stop: {stop}")
     target = "the first level at least 1.5R away" if sc.target == "default" else lv(sc.target)

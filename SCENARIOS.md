@@ -36,6 +36,9 @@ Times are US Eastern.
 | **breaks above / below** X | Closes beyond X **from the other side, with momentum**: the candle body is at least half the 30m ATR |
 | **retests** X | After a break, comes back to touch X |
 | **fails at** X | Breaks X, then closes back inside within 2 candles (a trap) |
+| **pulls back to the EMA** | In a trend, a candle trades back to the EMA line (its low reaches it in an uptrend, its high in a downtrend) |
+| **pauses** | In a trend, 2-4 candles move sideways: their combined high-low range is no more than one 30m ATR |
+| **breaks the pause** | After a pause, a candle closes beyond the pause's high (uptrend) or low (downtrend) |
 
 ## 3. Words for conditions
 
@@ -109,6 +112,28 @@ in **[brackets]** is a default you can change by saying so.
 - **Target:** the level you name, else [POC / the next level at least 1.5R away]
 - **Evidence:** not tested yet
 
+### H. Continuation ("continuation")
+For trends that keep going between your levels, with nothing nearby to hold or
+retest. There are two versions; say which one you want.
+
+**H1. Pullback to the EMA**
+> "Trending down. Short the **pullback to the EMA**."
+
+- **Trigger:** trending, then a candle pulls back to the EMA line and closes back on the trend side of it
+- **Entry:** that candle's close
+- **Stop:** beyond the pullback candle's wick [+2 pts]
+- **Target:** the level you name, else [the first level at least 1.5R away]
+
+**H2. Pause and break**
+> "Trending down. Short when it **breaks the pause**."
+
+- **Trigger:** trending, then a pause of 2-4 candles, then a candle closes beyond the pause in the trend's direction
+- **Entry:** the breaking candle's close
+- **Stop:** the other side of the pause [+2 pts]
+- **Target:** the level you name, else [the first level at least 1.5R away]
+
+- **Evidence (both):** not tested yet. These address the 10/7 and 10/8 London sell-offs, which moved between levels without touching any.
+
 ### G. Trend turn ("trend cross")
 > "In Asia, go with the **trend turn**."
 
@@ -167,9 +192,9 @@ scenario back in plain English before it can be armed.
 | Field | Values |
 |---|---|
 | `name` | Any short name |
-| `type` | `fade`, `reclaim`, `lose`, `pullback`, `breakout`, `retest`, `trap`, `trend_turn` |
+| `type` | `fade`, `reclaim`, `lose`, `pullback`, `breakout`, `retest`, `trap`, `trend_turn`, `continuation_ema`, `continuation_pause` |
 | `side` | `long` or `short` |
-| `level` | A level word from section 1 (`pdVAH`, `VAH 9/22`, `ATR+50%`, `open`, `weekly high`) or a price. Not used by `trend_turn` |
+| `level` | A level word from section 1 (`pdVAH`, `VAH 9/22`, `ATR+50%`, `open`, `weekly high`) or a price. Not used by `trend_turn` or the `continuation` types |
 | `conditions` | List, any of: `{"price": "above"/"below", "level": <level>}`, `{"trend": "up"/"down"}`, `{"stretched": true}`, `{"day_range_pct": 50}`, `{"not_choppy": true}`. `day_range_pct` means the day has moved at least that % of its ATR from the open: **against** the trade for `fade` (up before a short fade, down before a long fade), **with** the trade for every other type |
 | `session` | `Asia`, `London`, `NY` or `any` |
 | `until` | `"HH:MM"` ET expiry, or `null` for end of session |
@@ -181,7 +206,8 @@ scenario back in plain English before it can be armed.
 | `mode` | `paper` or `live` |
 
 Types map to section 4: `fade` = A, `reclaim` / `lose` = B, `pullback` = C,
-`breakout` = D, `retest` = E, `trap` = F, `trend_turn` = G.
+`breakout` = D, `retest` = E, `trap` = F, `trend_turn` = G,
+`continuation_ema` = H1, `continuation_pause` = H2.
 
 ## Example
 

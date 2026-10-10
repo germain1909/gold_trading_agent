@@ -82,6 +82,17 @@ def test_validation_errors_are_specific():
         raise AssertionError("bad JSON accepted")
 
 
+def test_continuation_scenarios():
+    ema = from_dict({"name": "London trend", "type": "continuation_ema", "side": "short", "session": "London"})
+    text = describe(ema, LEVELS)
+    assert "H1. Continuation - pullback to the EMA, SHORT" in text
+    assert "pulls back to the EMA line and closes back below it" in text
+    pause = from_dict({"name": "flag", "type": "continuation_pause", "side": "long", "target": "ATR+50%"})
+    text = describe(pause, LEVELS)
+    assert "closes beyond the pause's high" in text and "Target: ATR+50% 31242.16" in text
+    assert pause.level is None                       # no level needed
+
+
 def test_missing_level_today():
     try:
         resolve_level("ATR-75%", LEVELS)
