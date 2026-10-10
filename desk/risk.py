@@ -6,7 +6,8 @@ For a rejection candle:
   - stop:   beyond the rejection wick (candle high for shorts, low for longs) + buffer
   - target: the first watched level in the trade's direction that is at least
             MIN_RR away (level to level; closer levels are passed over)
-  - size:   the most MNQ contracts (between MIN and MAX) whose risk fits MAX_RISK
+  - size:   the most MNQ contracts (between MIN and MAX, default 1-3) whose risk
+            fits MAX_RISK; wide stops trade smaller instead of being skipped
 
 A trade is skipped if the stop is too wide even at MIN contracts, there is no
 level to target, or reward/risk is below MIN_RR.
@@ -28,7 +29,7 @@ class RiskConfig:
     contract: str = os.getenv("RISK_CONTRACT", "MNQ")
     point_value: float = _env("RISK_POINT_VALUE", 2.0)          # MNQ = $2/pt, NQ = $20/pt
     tick_size: float = _env("RISK_TICK_SIZE", 0.25)
-    min_contracts: int = int(_env("RISK_MIN_CONTRACTS", 2))
+    min_contracts: int = int(_env("RISK_MIN_CONTRACTS", 1))
     max_contracts: int = int(_env("RISK_MAX_CONTRACTS", 3))
     max_risk_per_trade: float = _env("RISK_MAX_PER_TRADE", 250)  # dollars
     stop_buffer_pts: float = _env("RISK_STOP_BUFFER", 2.0)       # beyond the wick

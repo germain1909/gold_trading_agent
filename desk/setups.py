@@ -3,7 +3,9 @@ The two trade setups, as pure functions over closed 30m candles.
 
 Setup 1 - TREND CROSS (ride it)
     A candle closes beyond BOTH the EMA line (EMA 15 smoothed SMA 5) and the
-    BB basis (EMA 24) after the previous candle was not beyond both.
+    BB basis (EMA 24) after the previous candle was not beyond both, AND either
+    price was on the other side of both lines for CROSS_MIN_PRIOR candles first
+    or the cross candle is a breakout (body >= CROSS_BREAKOUT_BODY_ATR x ATR).
     Entry at that close, stop beyond the farther line + buffer, target the first
     level at least MIN_RR away; exit early if a candle closes back across the
     EMA line.
@@ -26,6 +28,16 @@ from .patterns import evaluate_level
 from .risk import RiskConfig, plan_trade, size_position, round_to_tick
 
 STRETCH_MIN = float(os.getenv("SETUP_STRETCH_ATR", 1.5))
+# Trend-cross filters - a cross needs a reason, not a wiggle through flat lines.
+# It qualifies if EITHER:
+#   CROSS_MIN_PRIOR         - price closed on the other side of both lines for at
+#                             least this many candles in a row first (a real trend change)
+#   CROSS_BREAKOUT_BODY_ATR - or the cross candle's body is at least this many ATRs
+#                             (a decisive breakout out of chop)
+# CROSS_MIN_BODY_ATR is an extra, optional minimum body for every cross (0 = off).
+CROSS_MIN_PRIOR = int(os.getenv("SETUP_CROSS_MIN_PRIOR", 3))
+CROSS_BREAKOUT_BODY_ATR = float(os.getenv("SETUP_CROSS_BREAKOUT_BODY_ATR", 1.5))
+CROSS_MIN_BODY_ATR = float(os.getenv("SETUP_CROSS_MIN_BODY_ATR", 0))
 
 
 def _entry_time(candle: Dict[str, Any], minutes: int) -> datetime:
@@ -39,7 +51,14 @@ def trend_cross_signals(
     minutes: int,
     levels: Optional[List[Dict[str, Any]]] = None,
     cfg: Optional[RiskConfig] = None,
+    atr_v: Optional[List[Optional[float]]] = None,
+    min_prior: int = CROSS_MIN_PRIOR,
+    min_body_atr: float = CROSS_MIN_BODY_ATR,
+    breakout_body_atr: float = CROSS_BREAKOUT_BODY_ATR,
 ) -> List[Dict[str, Any]]:
+    """
+    Every fresh cross, each marked "qualified" or with a "why_not" from the filters.
+    """
     cfg = cfg or RiskConfig()
     level_prices = [lv["price"] for lv in levels or []]
     out = []
@@ -50,6 +69,20 @@ def trend_cross_signals(
             before = crossed_for_entry(side, p["c"], ema_l[i - 1], basis[i - 1])
             if not now or before:
                 continue
+            other = "short" if side == "long" else "long"
+            prior = 0
+            for k in range(i - 1, -1, -1):
+                if not crossed_for_entry(other, candles[k]["c"], ema_l[k], basis[k]):
+                    break
+                prior += 1
+            a = atr_v[i] if atr_v else None
+            body_atr = abs(c["c"] - c["o"]) / a if a else None
+            why_not = None
+            breakout = bool(breakout_body_atr) and body_atr is not None and body_atr >= breakout_body_atr
+            if prior < min_prior and not breakout:
+                why_not = f"only {prior} candle(s) on the other side first (< {min_prior})"
+            elif min_body_atr and (body_atr is None or body_atr < min_body_atr):
+                why_not = f"cross body {body_atr or 0:.2f} ATR < {min_body_atr}"
             if side == "long":
                 stop = round_to_tick(min(ema_l[i], basis[i]) - cfg.stop_buffer_pts, cfg.tick_size, up=False)
             else:
@@ -60,7 +93,11 @@ def trend_cross_signals(
                 "t": c["t"],
                 "entry_time": _entry_time(c, minutes),
                 "side": side,
-                "detail": f"closed {'above' if side == 'long' else 'below'} EMA {ema_l[i]:.2f} / BB {basis[i]:.2f}",
+                "detail": f"closed {'above' if side == 'long' else 'below'} EMA {ema_l[i]:.2f} / BB {basis[i]:.2f}, "
+                          f"{prior} prior, body {abs(c['c'] - c['o']):g} pts"
+                          f"{f' = {body_atr:.2f} ATR' if body_atr is not None else ''}",
+                "qualified": why_not is None,
+                "why_not": why_not,
                 "plan": size_position(side, c["c"], stop, level_prices, cfg),
             })
     return out

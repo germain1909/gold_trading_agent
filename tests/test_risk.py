@@ -56,6 +56,15 @@ def test_low_reward_risk_skips():
     assert not p["ok"] and "1.5R" in p["reason"]
 
 
+def test_wide_stop_falls_back_to_one_contract():
+    cfg1 = RiskConfig(point_value=2.0, min_contracts=1, max_contracts=3, max_risk_per_trade=250,
+                      stop_buffer_pts=2.0, min_rr=1.5, min_target_pts=10.0)
+    # 80 pt stop: 2 MNQ = $320 too much, 1 MNQ = $160 fits
+    candle = {"o": 31170, "h": 31250, "l": 31150, "c": 31172}
+    p = plan_trade(31252, {"bias": "bearish"}, candle, LEVELS + [30875], cfg1)
+    assert p["ok"] and p["contracts"] == 1 and p["risk_usd"] == 160
+
+
 def test_simulate_stop_first_when_bar_hits_both():
     plan = {"side": "short", "entry": 100, "stop": 110, "target": 80, "contracts": 3}
     r = simulate(plan, [{"t": "t1", "o": 100, "h": 111, "l": 79, "c": 90}], CFG)

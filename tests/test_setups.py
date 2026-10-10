@@ -23,6 +23,25 @@ def test_trend_cross_long_only_on_fresh_cross():
     assert plan["stop"] == 100 and plan["entry"] == 110             # min(102, 104) - 2
 
 
+def test_cross_filters_prior_candles_or_breakout():
+    # Lines at 100/100, ATR 10. Three closes below both, then a small cross above -> prior rule passes
+    below = [c(f"0{h}:00", 95, 96, 94, 95) for h in range(1, 4)]
+    cross = c("04:00", 99, 103, 98, 102)                          # body 3 = 0.3 ATR
+    lines, atr_v = [100] * 4, [10] * 4
+    sigs = trend_cross_signals(below + [cross], lines, lines, 30, cfg=CFG, atr_v=atr_v,
+                               min_prior=3, breakout_body_atr=1.5)
+    assert sigs[-1]["qualified"]
+    # Only one close below first: small cross is chop, a 1.6 ATR breakout candle still qualifies
+    chop = [c("01:00", 101, 102, 100, 101), c("02:00", 99, 100, 94, 95)]
+    small = trend_cross_signals(chop + [cross], [100] * 3, [100] * 3, 30, cfg=CFG, atr_v=[10] * 3,
+                                min_prior=3, breakout_body_atr=1.5)
+    assert not small[-1]["qualified"] and "other side" in small[-1]["why_not"]
+    big = c("04:00", 95, 112, 94, 111)                            # body 16 = 1.6 ATR
+    brk = trend_cross_signals(chop + [big], [100] * 3, [100] * 3, 30, cfg=CFG, atr_v=[10] * 3,
+                              min_prior=3, breakout_body_atr=1.5)
+    assert brk[-1]["qualified"]
+
+
 def test_stretched_rejection_needs_stretch_and_pattern():
     # Shooting star into a level at 200, far above lines at ~150 with ATR 20 -> 2.5 ATR stretched
     candles = [c("01:00", 180, 190, 178, 188), c("01:30", 190, 206, 189, 191)]

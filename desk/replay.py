@@ -197,7 +197,7 @@ def simulate_setups(candles, levels, minute_bars, start):
     ema_l, basis, atr_v = ema_line(closes), bb_basis(closes), atr(candles)
     exit_line = {b["t"]: e for b, e in zip(candles, ema_l)}
 
-    signals = trend_cross_signals(candles, ema_l, basis, CANDLE_MINUTES, levels, cfg) + \
+    signals = trend_cross_signals(candles, ema_l, basis, CANDLE_MINUTES, levels, cfg, atr_v) + \
         stretched_rejection_signals(candles, ema_l, basis, atr_v, levels, CANDLE_MINUTES, cfg)
     # Only the replayed day, and never an entry at the 17:00 daily close
     signals = [s for s in signals
@@ -222,7 +222,7 @@ def simulate_setups(candles, levels, minute_bars, start):
             when = sig["entry_time"].astimezone(ET).strftime("%H:%M")
             tag = f"{when} {sig['setup'].upper()} {sig['side']} ({sig['detail']})"
             plan = sig["plan"]
-            if sig["setup"] == "stretched rejection" and not sig["qualified"]:
+            if not sig["qualified"]:
                 print(f"  {DIM}{tag} - not a setup: {sig['why_not']}{RESET}")
                 continue
             if day_pnl <= -cfg.daily_loss_limit:
