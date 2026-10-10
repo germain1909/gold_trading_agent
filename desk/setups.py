@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 
 from .indicators import crossed_for_entry
+from .sessions import session_of
 from .patterns import evaluate_level
 from .risk import RiskConfig, plan_trade, size_position, round_to_tick
 
@@ -38,6 +39,9 @@ STRETCH_MIN = float(os.getenv("SETUP_STRETCH_ATR", 1.5))
 CROSS_MIN_PRIOR = int(os.getenv("SETUP_CROSS_MIN_PRIOR", 3))
 CROSS_BREAKOUT_BODY_ATR = float(os.getenv("SETUP_CROSS_BREAKOUT_BODY_ATR", 1.5))
 CROSS_MIN_BODY_ATR = float(os.getenv("SETUP_CROSS_MIN_BODY_ATR", 0))
+# Sessions where the prior-candles rule applies (comma-separated). Crosses in
+# other sessions don't need it. Default: all sessions.
+CROSS_PRIOR_SESSIONS = [x.strip() for x in os.getenv("SETUP_CROSS_PRIOR_SESSIONS", "Asia,London,NY").split(",") if x.strip()]
 
 
 def _entry_time(candle: Dict[str, Any], minutes: int) -> datetime:
@@ -55,15 +59,18 @@ def trend_cross_signals(
     min_prior: int = CROSS_MIN_PRIOR,
     min_body_atr: float = CROSS_MIN_BODY_ATR,
     breakout_body_atr: float = CROSS_BREAKOUT_BODY_ATR,
+    prior_sessions: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Every fresh cross, each marked "qualified" or with a "why_not" from the filters.
     """
     cfg = cfg or RiskConfig()
     level_prices = [lv["price"] for lv in levels or []]
+    prior_sessions = CROSS_PRIOR_SESSIONS if prior_sessions is None else prior_sessions
     out = []
     for i in range(1, len(candles)):
         c, p = candles[i], candles[i - 1]
+        needs_prior = session_of(datetime.fromisoformat(c["t"])) in prior_sessions
         for side in ("long", "short"):
             now = crossed_for_entry(side, c["c"], ema_l[i], basis[i])
             before = crossed_for_entry(side, p["c"], ema_l[i - 1], basis[i - 1])
@@ -79,7 +86,7 @@ def trend_cross_signals(
             body_atr = abs(c["c"] - c["o"]) / a if a else None
             why_not = None
             breakout = bool(breakout_body_atr) and body_atr is not None and body_atr >= breakout_body_atr
-            if prior < min_prior and not breakout:
+            if needs_prior and prior < min_prior and not breakout:
                 why_not = f"only {prior} candle(s) on the other side first (< {min_prior})"
             elif min_body_atr and (body_atr is None or body_atr < min_body_atr):
                 why_not = f"cross body {body_atr or 0:.2f} ATR < {min_body_atr}"

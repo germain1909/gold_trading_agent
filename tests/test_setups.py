@@ -42,6 +42,17 @@ def test_cross_filters_prior_candles_or_breakout():
     assert brk[-1]["qualified"]
 
 
+def test_prior_rule_only_in_chosen_sessions():
+    # Same small chop cross at 01:30 UTC (21:30 ET = Asia) and 14:30 UTC (10:30 ET = NY)
+    def chop_then_cross(hour):
+        return [c(f"{hour - 1:02d}:30", 101, 102, 100, 101), c(f"{hour:02d}:00", 99, 100, 94, 95),
+                c(f"{hour:02d}:30", 99, 103, 98, 102)]
+    kw = dict(cfg=CFG, atr_v=[10] * 3, min_prior=3, breakout_body_atr=1.5, prior_sessions=["London", "NY"])
+    asia = trend_cross_signals(chop_then_cross(1), [100] * 3, [100] * 3, 30, **kw)
+    ny = trend_cross_signals(chop_then_cross(14), [100] * 3, [100] * 3, 30, **kw)
+    assert asia[-1]["qualified"] and not ny[-1]["qualified"]
+
+
 def test_stretched_rejection_needs_stretch_and_pattern():
     # Shooting star into a level at 200, far above lines at ~150 with ATR 20 -> 2.5 ATR stretched
     candles = [c("01:00", 180, 190, 178, 188), c("01:30", 190, 206, 189, 191)]

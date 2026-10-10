@@ -16,6 +16,7 @@ Reference days used to check every strategy change (NQ, full 23h session, 30m ca
 |---|---|
 | 2026-10-09 | 31461.75 weekly-high, 31252 VAH, 31079.25 VAL, 31020 asia-open |
 | 2026-09-23 | 31018 VAH, 30944 POC, 30812 VAL, 30681 prevDayPOC |
+| 2026-09-25 | 30600 VAL, 30742 POC, 30830 VAH, 30916 prevDayVAL (9/24 profile) |
 
 ---
 
@@ -94,6 +95,23 @@ Reference results with lock and roll on:
 ```bash
 RISK_LOCK_ROLL=true python -m desk.replay NQ 2026-09-23 31018:VAH 30944:POC 30812:VAL 30681:prevDayPOC
 ```
+
+- **Session-scoped trend-cross filter** (`desk/setups.py`, opt-in with `SETUP_CROSS_PRIOR_SESSIONS=London,NY`): apply the "3+ candles on the other side first" rule only in the listed sessions. Asia trend crosses (smoother overnight trends) don't need it; London/NY crosses (choppier) still do. Default is all sessions, the same as v2.
+
+Added a third clean reference day: **2026-09-25** with 9/24's profile levels (30600 VAL, 30742 POC, 30830 VAH, 30916 prevDayVAL).
+
+| Day | v2 | v2 + prior rule only in London/NY | Why |
+|---|---|---|---|
+| 10/9 | +$2,202 | +$2,202 | Asia winner already had 19 prior candles |
+| 9/23 | +$282 | +$300 | Adds a small Asia long (+$18) |
+| 9/25 | −$60 | +$640 | Asia long to VAH (+$700); London/NY chop still filtered |
+| **Total** | **+$2,424** | **+$3,142** | |
+
+```bash
+SETUP_CROSS_PRIOR_SESSIONS=London,NY python -m desk.replay NQ 2026-09-25 30600:VAL 30742:POC 30830:VAH 30916:prevDayVAL
+```
+
+Note: the earlier 9/24 run used 9/24's own levels (look-ahead), so it was discarded.
 
 ---
 
