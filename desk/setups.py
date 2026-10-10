@@ -42,6 +42,8 @@ CROSS_MIN_BODY_ATR = float(os.getenv("SETUP_CROSS_MIN_BODY_ATR", 0))
 # Sessions where the prior-candles rule applies (comma-separated). Crosses in
 # other sessions don't need it. Default: all sessions.
 CROSS_PRIOR_SESSIONS = [x.strip() for x in os.getenv("SETUP_CROSS_PRIOR_SESSIONS", "Asia,London,NY").split(",") if x.strip()]
+# Sessions where trend crosses are traded at all (comma-separated; "none" = off).
+CROSS_SESSIONS = [x.strip() for x in os.getenv("SETUP_CROSS_SESSIONS", "Asia,London,NY").split(",") if x.strip()]
 # Stretched rejections only fade a day that has already moved this % of its daily
 # ATR from the open, measured at the rejection candle's extreme (0 = off).
 FADE_MIN_RANGE_PCT = float(os.getenv("SETUP_FADE_MIN_RANGE_PCT", 0))
@@ -76,7 +78,10 @@ def trend_cross_signals(
     out = []
     for i in range(1, len(candles)):
         c, p = candles[i], candles[i - 1]
-        needs_prior = session_of(datetime.fromisoformat(c["t"])) in prior_sessions
+        session = session_of(datetime.fromisoformat(c["t"]))
+        if session not in CROSS_SESSIONS:
+            continue
+        needs_prior = session in prior_sessions
         for side in ("long", "short"):
             now = crossed_for_entry(side, c["c"], ema_l[i], basis[i])
             before = crossed_for_entry(side, p["c"], ema_l[i - 1], basis[i - 1])

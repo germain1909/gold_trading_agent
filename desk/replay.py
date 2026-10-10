@@ -26,6 +26,7 @@ Finally it simulates the two setups (desk/setups.py) through the day:
 Up to RISK_TRADES_PER_SESSION trades per session (default 2), one position at
 a time, risk rules from desk/risk.py, with 1-minute bars deciding fills.
 """
+import os
 import sys
 import time
 from datetime import datetime, timedelta
@@ -109,7 +110,10 @@ def main() -> None:
         end = datetime.combine(day, datetime.min.time(), ET).replace(hour=17)
 
     client = TopstepClient()
-    contract = resolve_front_month(client, symbol)
+    # The backtest passes the contract that was front month on this day
+    override = os.getenv("DESK_CONTRACT_ID")
+    contract = {"id": override, "name": override.split(".")[-2] + override.split(".")[-1]} if override \
+        else resolve_front_month(client, symbol)
 
     # ATR % levels from the trading-day open (the trader's TradingView indicator)
     try:

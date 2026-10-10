@@ -11,6 +11,9 @@ For each trading day D:
 
 Each day then runs through desk.replay with the current strategy settings.
 
+Each day uses the contract that was front month that day (quarterly NQ rolls
+8 days before the third-Friday expiry), and its levels come from that contract.
+
 Run from the project root:
     python -m desk.backtest NQ 2026-10-05 2026-10-09
     python -m desk.backtest NQ 2026-10-05 2026-10-09 --show     # print each day's trades
@@ -38,6 +41,27 @@ RED = "\033[91m"
 RESET = "\033[0m"
 
 
+MONTH_CODES = {3: "H", 6: "M", 9: "U", 12: "Z"}
+ROOT_IDS = {"NQ": "CON.F.US.ENQ", "MNQ": "CON.F.US.MNQ", "ES": "CON.F.US.EP", "MES": "CON.F.US.MES"}
+
+
+def third_friday(year: int, month: int) -> date:
+    d = date(year, month, 15)
+    return d + timedelta(days=(4 - d.weekday()) % 7)
+
+
+def front_month_id(symbol: str, day: date) -> str:
+    """Quarterly contract that was front month on `day` (rolls 8 days before expiry)."""
+    root = ROOT_IDS.get(symbol)
+    if not root:
+        raise SystemExit(f"No quarterly contract mapping for {symbol}")
+    for year in (day.year, day.year + 1):
+        for month in (3, 6, 9, 12):
+            if day < third_friday(year, month) - timedelta(days=8):
+                return f"{root}.{MONTH_CODES[month]}{year % 100}"
+    raise SystemExit(f"Could not find a contract for {day}")
+
+
 def build_levels(day: date, trading_days, profiles, day_open: float, atr_value: float):
     idx = trading_days.index(day)
     prior = trading_days[max(0, idx - 1 - LOOKBACK):idx][::-1]      # most recent first
@@ -47,6 +71,7 @@ def build_levels(day: date, trading_days, profiles, day_open: float, atr_value: 
         if all(abs(price - lv[0]) > DEDUPE_PTS for lv in levels):
             levels.append((price, label))
 
+    prior = [d for d in prior if d in profiles]
     for k, d in enumerate(prior):
         p = profiles[d]
         if k == 0:
@@ -70,29 +95,43 @@ def main() -> None:
     first, last = (datetime.strptime(a, "%Y-%m-%d").date() for a in args[1:3])
 
     client = TopstepClient()
-    contract = resolve_front_month(client, symbol)
-    daily = fetch_daily_bars(client, contract["id"], last, lookback_days=(last - first).days + 200)
-    trading_days = [datetime.fromisoformat(b["t"]).date() for b in daily]
+    current = resolve_front_month(client, symbol)
+    calendar = fetch_daily_bars(client, current["id"], last, lookback_days=(last - first).days + 200)
+    trading_days = [datetime.fromisoformat(b["t"]).date() for b in calendar]
     days = [d for d in trading_days if first <= d <= last]
     if not days:
         raise SystemExit("No trading days in that range.")
 
+    contract_of = {d: front_month_id(symbol, d) for d in days}
+    dailies = {cid: fetch_daily_bars(client, cid, last, lookback_days=(last - first).days + 200)
+               for cid in sorted(set(contract_of.values()))}
     need = set()
     for d in days:
         i = trading_days.index(d)
-        need.update(trading_days[max(0, i - 1 - LOOKBACK):i])
-    print(f"{DIM}Building volume profiles for {len(need)} days ({VALUE_AREA:.0%} value area, full session)...{RESET}")
-    profiles = {d: volume_profile(fetch_bars(client, contract["id"], *session_window(d, "full"), minutes=1))
-                for d in sorted(need)}
+        need.update((contract_of[d], p) for p in trading_days[max(0, i - 1 - LOOKBACK):i])
+    print(f"{DIM}Contracts: " + ", ".join(sorted(set(contract_of.values()))) +
+          f" | building {len(need)} volume profiles ({VALUE_AREA:.0%} value area, full session)...{RESET}")
+    profiles = {}
+    for cid, p in sorted(need):
+        bars = fetch_bars(client, cid, *session_window(p, "full"), minutes=1)
+        if bars:
+            profiles[(cid, p)] = volume_profile(bars)
 
-    env = {**os.environ, "ATR_LEVELS": os.getenv("ATR_LEVELS", "beyond")}
+    base_env = {**os.environ, "ATR_LEVELS": os.getenv("ATR_LEVELS", "beyond")}
     total, rows, failed = 0.0, [], []
     for d in days:
-        day_open, atr_value = day_open_and_atr(daily, d)
-        levels = build_levels(d, trading_days, profiles, day_open, atr_value)
+        cid = contract_of[d]
+        try:
+            day_open, atr_value = day_open_and_atr(dailies[cid], d)
+        except ValueError as e:
+            failed.append(d)
+            print(f"\n{BOLD}{d:%a %m/%d}{RESET}  {RED}FAILED - not counted: {e}{RESET}")
+            continue
+        levels = build_levels(d, trading_days, {p: profiles[(c, p)] for (c, p) in profiles if c == cid},
+                              day_open, atr_value)
         level_args = [f"{px(p)}:{label}" for p, label in levels]
         proc = subprocess.run([sys.executable, "-m", "desk.replay", symbol, d.isoformat(), *level_args],
-                              capture_output=True, text=True, env=env)
+                              capture_output=True, text=True, env={**base_env, "DESK_CONTRACT_ID": cid})
         clean = re.sub(r"\x1b\[[0-9;]*m", "", proc.stdout)
         m = re.search(r"Day P&L: ([+-])\$([\d,]+)", clean)
         if not m:

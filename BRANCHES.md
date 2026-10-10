@@ -131,6 +131,30 @@ Week of 10/5-10/9 with computed levels (default rules): **+$2,232**, 14 trades, 
 | + fade after 50% | +$5,861 |
 | + both | +$5,975 |
 
+### Long backtest (8/19-10/9, 37 days) and the shift to an assistant
+
+Topstep intraday history starts 8/12/2026, so this is the longest test possible.
+The backtest now uses the front-month contract for each day (Sep -> Dec roll on 9/10).
+
+| 37 days | Total | Trades | Max drawdown | Worst day |
+|---|---|---|---|---|
+| Default rules | +$2,512 | 92 | **-$2,702** (would fail a 50K combine) | -$692 |
+| A: fade (50% rule) + trend cross in Asia only | +$3,275 | 33 | -$594 | -$370 |
+| B: fade (50% rule) only | +$2,115 | 11 | -$370 | -$370 |
+
+On the 28 days not used for design, the default rules lost $2,179: trend crosses
+in London/NY lost $3,350 (19-20% win rate), while stretched-rejection fades made
+money. A and B were chosen from this data, so their numbers are optimistic.
+
+- `SETUP_CROSS_SESSIONS` (opt-in): sessions where trend crosses are traded (`Asia`, `none`, ...).
+- **SCENARIOS.md**: the scenario playbook - exact words for levels, actions and
+  conditions, seven scenario types with entry/stop/target, and a JSON format so
+  scenarios can be written by hand, by the desk agent, or by another AI.
+
+Direction from here: the desk becomes an assistant that watches the trader's
+levels and scenarios and proposes or paper-executes setups, rather than a
+fully automatic system. Validation is forward (paper trading).
+
 ---
 
 ## Running
