@@ -44,6 +44,11 @@ class RiskConfig:
     lock_roll: bool = os.getenv("RISK_LOCK_ROLL", "false").lower() == "true"
     lock_buffer_pts: float = _env("RISK_LOCK_BUFFER", 5.0)
     candle_minutes: int = int(_env("DESK_CANDLE_MINUTES", 30))
+    # Minimum stop distance as a fraction of the 30m ATR (0 = off). Stops tighter
+    # than this get widened, and size shrinks to keep risk under max_risk_per_trade.
+    min_stop_atr: float = _env("RISK_MIN_STOP_ATR", 0)
+    # No new entries at or after this time (ET, HH:MM) until the next session opens.
+    last_entry: str = os.getenv("RISK_LAST_ENTRY", "15:30")
 
 
 def round_to_tick(price: float, tick: float, up: bool) -> float:
@@ -66,12 +71,22 @@ def choose_target(side: str, entry: float, stop: float, levels: List[float],
     return None
 
 
+def widen_stop(side: str, entry: float, stop: float, min_pts: float, cfg: RiskConfig) -> float:
+    """Push a stop out to at least min_pts from entry (rounded to tick)."""
+    if not min_pts or abs(entry - stop) >= min_pts:
+        return stop
+    if side == "short":
+        return round_to_tick(entry + min_pts, cfg.tick_size, up=True)
+    return round_to_tick(entry - min_pts, cfg.tick_size, up=False)
+
+
 def plan_trade(
     level_price: float,
     rejection: Dict[str, Any],
     candle: Dict[str, Any],
     levels: List[float],
     cfg: Optional[RiskConfig] = None,
+    min_stop_pts: float = 0,
 ) -> Dict[str, Any]:
     """
     Build a trade plan for a rejection.
@@ -94,6 +109,7 @@ def plan_trade(
         stop = round_to_tick(candle["h"] + cfg.stop_buffer_pts, cfg.tick_size, up=True)
     else:
         stop = round_to_tick(candle["l"] - cfg.stop_buffer_pts, cfg.tick_size, up=False)
+    stop = widen_stop("short" if short else "long", entry, stop, min_stop_pts, cfg)
     target = choose_target("short" if short else "long", entry, stop, levels, level_price, cfg)
 
     risk_pts = abs(entry - stop)
@@ -261,13 +277,14 @@ def simulate(plan: Dict[str, Any], bars_after: List[Dict[str, Any]], cfg: Option
 
 
 def size_position(side: str, entry: float, stop: float, levels: Optional[List[float]] = None,
-                  cfg: Optional[RiskConfig] = None) -> Dict[str, Any]:
+                  cfg: Optional[RiskConfig] = None, min_stop_pts: float = 0) -> Dict[str, Any]:
     """
     Size a trade whose stop isn't a candle wick (e.g. a trend cross). Target is
     the first level at least min_rr away; with no such level the trade has no
     target and rides until the trailing exit.
     """
     cfg = cfg or RiskConfig()
+    stop = widen_stop(side, entry, stop, min_stop_pts, cfg)
     risk_pts = abs(entry - stop)
     target = choose_target(side, entry, stop, levels or [], None, cfg)
     plan: Dict[str, Any] = {"side": side, "entry": entry, "stop": stop, "target": target,

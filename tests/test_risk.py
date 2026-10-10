@@ -65,6 +65,16 @@ def test_wide_stop_falls_back_to_one_contract():
     assert p["ok"] and p["contracts"] == 1 and p["risk_usd"] == 160
 
 
+def test_min_stop_widens_and_resizes():
+    cfg = RiskConfig(point_value=2.0, min_contracts=1, max_contracts=3, max_risk_per_trade=250,
+                     stop_buffer_pts=2.0, min_rr=1.5, min_target_pts=10.0)
+    from desk.risk import size_position
+    tight = size_position("long", 100, 97, [200], cfg)                     # 3 pt stop
+    wide = size_position("long", 100, 97, [200], cfg, min_stop_pts=50)     # widened to 50
+    assert tight["stop"] == 97 and tight["contracts"] == 3
+    assert wide["stop"] == 50 and wide["contracts"] == 2 and wide["risk_usd"] == 200
+
+
 def test_simulate_stop_first_when_bar_hits_both():
     plan = {"side": "short", "entry": 100, "stop": 110, "target": 80, "contracts": 3}
     r = simulate(plan, [{"t": "t1", "o": 100, "h": 111, "l": 79, "c": 90}], CFG)

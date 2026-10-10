@@ -113,6 +113,24 @@ SETUP_CROSS_PRIOR_SESSIONS=London,NY python -m desk.replay NQ 2026-09-25 30600:V
 
 Note: the earlier 9/24 run used 9/24's own levels (look-ahead), so it was discarded.
 
+### Levels from data, backtest runner, more rules
+
+- **ATR % levels** (`desk/atr_levels.py`): the trader's TradingView indicator - trading-day open +/- 25/50/75/100% of daily ATR(14). `ATR_LEVELS=beyond` uses them only outside the value area (targets and rejection levels); `off` (default) / `all`.
+- **Clues on every signal**: % of the day's ATR used, and the nearest ATR level (recorded only).
+- **Volume profiles** (`desk/profile.py`): POC / VAH / VAL from 1-minute volume, full CME session, 70% value area. Matches the trader's levels to within ~5-20 pts on POC.
+- **Backtest runner** (`desk/backtest.py`): any date range, levels computed automatically (prior-day profile + older VAH/POC/VAL within 1 ATR + ATR levels beyond value). Retries on Topstep rate limits; failed days are reported, never counted as $0.
+- **No new entries after 15:30 ET** (`RISK_LAST_ENTRY`, on by default).
+- Opt-in, under evaluation: minimum stop (`RISK_MIN_STOP_ATR` - tested, made results worse), Setup 3 trend pullback (`SETUP_PULLBACK=true`), fade only after the day moved N% of ATR (`SETUP_FADE_MIN_RANGE_PCT=50`).
+
+Week of 10/5-10/9 with computed levels (default rules): **+$2,232**, 14 trades, worst day -$192. Mon-Thu (out of sample): +$1,066.
+
+| 10 days (5 reference + 10/5-10/9) | Total |
+|---|---|
+| Default | +$5,645 |
+| + trend pullback | +$5,759 |
+| + fade after 50% | +$5,861 |
+| + both | +$5,975 |
+
 ---
 
 ## Running

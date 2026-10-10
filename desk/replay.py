@@ -27,6 +27,7 @@ Up to RISK_TRADES_PER_SESSION trades per session (default 2), one position at
 a time, risk rules from desk/risk.py, with 1-minute bars deciding fills.
 """
 import sys
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -35,7 +36,9 @@ from . import store
 from .patterns import evaluate_level, STRENGTHS
 from .risk import RiskConfig, simulate, simulate_trail
 from .indicators import ema_line, bb_basis, atr, EMA_LENGTH, EMA_SMOOTHING, BB_LENGTH, ATR_LENGTH
-from .setups import trend_cross_signals, stretched_rejection_signals, STRETCH_MIN
+from .setups import (trend_cross_signals, stretched_rejection_signals, trend_pullback_signals,
+                     STRETCH_MIN, PULLBACK, FADE_MIN_RANGE_PCT)
+from . import atr_levels as atrl
 from .sessions import session_of, SESSIONS
 from .watcher import resolve_front_month, CANDLE_MINUTES, MIN_STRENGTH, px
 
@@ -48,12 +51,22 @@ BOLD = "\033[1m"
 RESET = "\033[0m"
 
 
+def post_with_retry(client: TopstepClient, url: str, payload: dict, tries: int = 6):
+    """POST to Topstep, backing off and retrying on rate limits (429) and server errors."""
+    for attempt in range(tries):
+        resp = client._session.post(url, headers={"Authorization": f"Bearer {client._token}"}, json=payload, timeout=30)
+        if resp.status_code != 429 and resp.status_code < 500:
+            break
+        time.sleep(2 ** attempt)
+    resp.raise_for_status()
+    return resp
+
+
 def fetch_bars(client: TopstepClient, contract_id: str, start: datetime, end: datetime, minutes: int = CANDLE_MINUTES):
     client._ensure_token()
-    resp = client._session.post(
+    resp = post_with_retry(client,
         f"{client._base_url}/api/History/retrieveBars",
-        headers={"Authorization": f"Bearer {client._token}"},
-        json={
+        {
             "contractId": contract_id,
             "live": False,
             "startTime": start.astimezone(ZoneInfo("UTC")).isoformat().replace("+00:00", "Z"),
@@ -63,9 +76,7 @@ def fetch_bars(client: TopstepClient, contract_id: str, start: datetime, end: da
             "limit": 5000,
             "includePartialBar": False,
         },
-        timeout=30,
     )
-    resp.raise_for_status()
     return sorted(resp.json().get("bars", []) or [], key=lambda b: b["t"])
 
 
@@ -99,6 +110,16 @@ def main() -> None:
 
     client = TopstepClient()
     contract = resolve_front_month(client, symbol)
+
+    # ATR % levels from the trading-day open (the trader's TradingView indicator)
+    try:
+        day_open, day_atr = atrl.day_open_and_atr(atrl.fetch_daily_bars(client, contract["id"], day), day)
+        all_atr_lv = atrl.atr_levels(day_open, day_atr)
+        atr_ctx = (day_open, day_atr, all_atr_lv)
+    except ValueError as e:
+        print(f"{DIM}ATR levels unavailable: {e}{RESET}")
+        all_atr_lv, atr_ctx = [], None
+    trade_levels = levels + atrl.active_levels(all_atr_lv, levels)
     # Start a few days early so the EMAs are warmed up; end late so trades can be scored
     all_bars = fetch_bars(client, contract["id"], start - timedelta(days=5),
                           end + timedelta(minutes=CANDLE_MINUTES * hold) + timedelta(hours=1))
@@ -108,7 +129,12 @@ def main() -> None:
 
     print(f"\n{BOLD}{symbol} ({contract['name']}) {day} - {CANDLE_MINUTES}m candles, "
           f"{'NY cash session' if rth else 'full 23h session'}, min strength: {MIN_STRENGTH}{RESET}")
-    print("Levels: " + ", ".join(f"{px(lv['price'])}{' ' + lv['label'] if lv['label'] else ''}" for lv in levels) + "\n")
+    print("Levels: " + ", ".join(f"{px(lv['price'])}{' ' + lv['label'] if lv['label'] else ''}" for lv in levels))
+    if atr_ctx:
+        print(f"ATR levels (open {px(atr_ctx[0])}, ATR {atr_ctx[1]:.1f}, mode {atrl.MODE}): " +
+              ", ".join(f"{lv['label']} {px(lv['price'])}{'*' if lv in trade_levels else ''}" for lv in all_atr_lv) +
+              ("   (* = used as a level)" if atrl.MODE != "off" else ""))
+    print()
 
     counts = {"rejected": 0, "accepted": 0, "ignored": 0}
     rejections = []
@@ -117,7 +143,7 @@ def main() -> None:
         candle = {k: b[k] for k in "ohlc"}
         when = datetime.fromisoformat(b["t"]).astimezone(ET).strftime("%a %H:%M")
         events = []
-        for lv in levels:
+        for lv in trade_levels:
             r = evaluate_level(lv["price"], candle, prev)
             if r is None:
                 continue
@@ -150,7 +176,7 @@ def main() -> None:
 
     minute_bars = fetch_bars(client, contract["id"], start, end, minutes=1)
     day_bars = [b for b in all_bars if datetime.fromisoformat(b["t"]) < end]   # warmup + the day
-    simulate_setups(day_bars, levels, minute_bars, start)
+    simulate_setups(day_bars, trade_levels, minute_bars, start, atr_ctx)
 
 
 def score(rej, all_bars, hold):
@@ -189,7 +215,7 @@ def print_scorecard(rejections, all_bars, hold, pick):
 
 
 
-def simulate_setups(candles, levels, minute_bars, start):
+def simulate_setups(candles, levels, minute_bars, start, atr_ctx=None):
     cfg = RiskConfig()
     for b in candles:
         b["end"] = (datetime.fromisoformat(b["t"]) + timedelta(minutes=CANDLE_MINUTES)).isoformat()
@@ -198,21 +224,32 @@ def simulate_setups(candles, levels, minute_bars, start):
     exit_line = {b["t"]: e for b, e in zip(candles, ema_l)}
     level_prices = [lv["price"] for lv in levels]
 
+    day_open, day_atr = (atr_ctx[0], atr_ctx[1]) if atr_ctx else (None, None)
     signals = trend_cross_signals(candles, ema_l, basis, CANDLE_MINUTES, levels, cfg, atr_v) + \
-        stretched_rejection_signals(candles, ema_l, basis, atr_v, levels, CANDLE_MINUTES, cfg)
+        stretched_rejection_signals(candles, ema_l, basis, atr_v, levels, CANDLE_MINUTES, cfg,
+                                    day_open=day_open, day_atr=day_atr)
+    if PULLBACK:
+        signals += trend_pullback_signals(candles, ema_l, basis, levels, CANDLE_MINUTES, cfg)
     # Only the replayed day, and never an entry at the 17:00 daily close
     signals = [s for s in signals
                if datetime.fromisoformat(s["t"]) >= start and session_of(s["entry_time"]) is not None]
     signals.sort(key=lambda s: (s["entry_time"], s["setup"]))
 
     print(f"\n{BOLD}Trades - 2 setups, max {cfg.trades_per_session} per session, one position at a time, "
+          f"no entries {cfg.last_entry}-18:00, "
+          f"{'min stop ' + format(cfg.min_stop_atr, 'g') + ' ATR, ' if cfg.min_stop_atr else ''}"
           f"{'LOCK AND ROLL ON (buffer ' + format(cfg.lock_buffer_pts, 'g') + ' pts), ' if cfg.lock_roll else ''}"
           f"{cfg.min_contracts}-{cfg.max_contracts} {cfg.contract}, max risk ${cfg.max_risk_per_trade:,.0f}/trade{RESET}")
     print(f"{DIM}  trend cross: close beyond EMA {EMA_LENGTH} (SMA {EMA_SMOOTHING}) and BB basis (EMA {BB_LENGTH}), "
           f"stop beyond lines + {cfg.stop_buffer_pts:g}, target first level >= {cfg.min_rr}R, "
           f"else exit on close back across EMA line")
     print(f"  stretched rejection: [pattern] rejection >= {STRETCH_MIN} x ATR({ATR_LENGTH}) from BB basis, "
-          f"stop beyond wick + {cfg.stop_buffer_pts:g}, target first level >= {cfg.min_rr}R{RESET}")
+          f"stop beyond wick + {cfg.stop_buffer_pts:g}, target first level >= {cfg.min_rr}R"
+          f"{f', only after the day moved {FADE_MIN_RANGE_PCT:g}% of ATR' if FADE_MIN_RANGE_PCT else ''}")
+    if PULLBACK:
+        print("  trend pullback: [pattern] rejection of a level with an established trend (3+ closes beyond "
+              "both lines), stop beyond wick, target first level >= " + format(cfg.min_rr, 'g') + "R")
+    print(RESET, end="")
 
     day_pnl = 0.0
     flat_from = None
@@ -222,8 +259,16 @@ def simulate_setups(candles, levels, minute_bars, start):
         taken = 0
         for sig in rows:
             when = sig["entry_time"].astimezone(ET).strftime("%H:%M")
-            tag = f"{when} {sig['setup'].upper()} {sig['side']} ({sig['detail']})"
+            clue_txt = ""
+            if atr_ctx:
+                at = sig["level"]["price"] if "level" in sig else sig["plan"]["entry"]
+                clue_txt = " [" + atrl.describe(atrl.clue(at, *atr_ctx)) + "]"
+            tag = f"{when} {sig['setup'].upper()} {sig['side']} ({sig['detail']}){clue_txt}"
             plan = sig["plan"]
+            hm = sig["entry_time"].astimezone(ET).strftime("%H:%M")
+            if cfg.last_entry and cfg.last_entry <= hm < "18:00":
+                print(f"  {DIM}{tag} - skipped: no new entries after {cfg.last_entry}{RESET}")
+                continue
             if not sig["qualified"]:
                 print(f"  {DIM}{tag} - not a setup: {sig['why_not']}{RESET}")
                 continue
@@ -258,7 +303,7 @@ def simulate_setups(candles, levels, minute_bars, start):
             color = GREEN if res["pnl_usd"] > 0 else RED
             exit_at = datetime.fromisoformat(res["exit_time"]).astimezone(ET).strftime("%a %H:%M")
             print(f"  {BOLD}{when} {sig['setup'].upper()} - {plan['side'].upper()} {plan['contracts']} "
-                  f"{plan['contract']}{RESET} ({sig['detail']})")
+                  f"{plan['contract']}{RESET} ({sig['detail']}){clue_txt}")
             print(f"        entry {px(plan['entry'])}  stop {px(plan['stop'])} ({px(plan['risk_pts'])} pts, "
                   f"-${plan['risk_usd']:,.0f})  {target}")
             for note in res.get("notes", []):

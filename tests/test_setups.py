@@ -4,7 +4,7 @@ Trend-cross and stretched-rejection setups, and the trailing exit.
 Run: python -m tests.test_setups   (or pytest, if installed)
 """
 from desk.risk import RiskConfig, simulate_trail
-from desk.setups import trend_cross_signals, stretched_rejection_signals
+from desk.setups import trend_cross_signals, stretched_rejection_signals, trend_pullback_signals
 
 CFG = RiskConfig(point_value=2.0, min_contracts=2, max_contracts=3, max_risk_per_trade=250,
                  stop_buffer_pts=2.0, min_rr=1.5, min_target_pts=10.0)
@@ -88,6 +88,28 @@ def test_trail_exits_at_level_target():
     minutes = [{"t": "2026-10-09T02:10:00+00:00", "o": 110, "h": 121, "l": 109, "c": 120}]
     r = simulate_trail(plan, minutes, candles, {candles[0]["t"]: 95}, CFG)
     assert r["how"] == "target" and r["pnl_usd"] == 20 * 2 * 2
+
+
+def test_fade_needs_day_to_have_moved():
+    candles = [c("01:00", 180, 190, 178, 188), c("01:30", 190, 206, 189, 191)]
+    levels = [{"price": 200, "label": "VAH"}, {"price": 150, "label": "VAL"}]
+    args = (candles, [150, 150], [140, 140], [20, 20], levels, 30, CFG)
+    # day open 150, daily ATR 100: candle high 206 = +56% -> fade allowed at 50%
+    assert stretched_rejection_signals(*args, day_open=150, day_atr=100, fade_min_range_pct=50)[0]["qualified"]
+    # day open 170: high 206 = +36% -> too early
+    early = stretched_rejection_signals(*args, day_open=170, day_atr=100, fade_min_range_pct=50)[0]
+    assert not early["qualified"] and "too early" in early["why_not"]
+
+
+def test_trend_pullback_hammer_in_uptrend():
+    # Lines at 100; three closes above, then a hammer that dips to support 110 and closes above it
+    candles = [c("01:00", 112, 118, 111, 117), c("01:30", 117, 121, 115, 120),
+               c("02:00", 120, 121, 109, 120.5)]
+    levels = [{"price": 110, "label": "pdVAH"}, {"price": 160, "label": "ATR+50%"}]
+    sigs = trend_pullback_signals(candles, [100] * 3, [100] * 3, levels, 30, CFG, min_trend=3)
+    assert len(sigs) == 1 and sigs[0]["side"] == "long" and sigs[0]["plan"]["target"] == 160
+    # Without an established trend there is no signal
+    assert trend_pullback_signals(candles, [100] * 3, [119] * 3, levels, 30, CFG, min_trend=3) == []
 
 
 if __name__ == "__main__":
