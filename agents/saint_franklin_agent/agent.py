@@ -1,4 +1,5 @@
 from google.adk.agents import LlmAgent
+from google.adk.models.lite_llm import LiteLlm
 from google.adk.tools import google_search
 import os
 import sys
@@ -21,9 +22,16 @@ load_dotenv() # automatically finds .env file
 GOOGLE_GENAI_USE_VERTEXAI = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "FALSE")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
+# Local model served by LM Studio's OpenAI-compatible server
+local_model = LiteLlm(
+    model="openai/" + os.getenv("LM_STUDIO_MODEL", "qwen3-vl-8b-instruct-mlx"),
+    api_base=os.getenv("LM_STUDIO_URL", "http://localhost:1234/v1"),
+    api_key="lm-studio",
+)
+
 
 agent = LlmAgent(
-    model="gemini-2.0-flash-lite",
+    model=local_model,
     name="franklin_saint_agent",
     description="A sharp, street-wise, and hyper-focused version of Franklin Saint from Snowfall — "
     "reimagined as an elite futures trader building a dynasty. This agent speaks with "

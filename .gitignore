@@ -13,3 +13,5 @@ __pycache__/
 
 #3.10 venv
 venv
+# Desk database (levels, alerts, notes)
+data/

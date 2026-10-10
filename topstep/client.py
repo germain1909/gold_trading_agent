@@ -125,6 +125,24 @@ class TopstepClient:
 
         return True
     
+    def search_contracts(self, search_text: str, live: bool = False) -> List[Dict[str, Any]]:
+        """
+        Returns all contracts matching search_text, with id, name,
+        tickSize, tickValue and activeContract fields.
+        """
+        self._ensure_token()
+
+        url = f"{self._base_url}/api/Contract/search"
+        headers = {
+            "accept": "application/json",
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+        }
+
+        resp = self._session.post(url, json={"live": live, "searchText": search_text}, headers=headers, timeout=30)
+        resp.raise_for_status()
+        return resp.json().get("contracts", [])
+
     def get_latest_contract_id(self, search_text: str, live: bool = False) -> str | None:
         """
         Returns ONLY the contract ID string for the active contract.
@@ -418,5 +436,44 @@ class TopstepClient:
 
         print(f"Topstep: Retrieved {len(bars_sorted)} bars.")
         return bars_sorted
+
+    def get_recent_bars(
+        self,
+        contract_id: str,
+        unit_number: int,
+        lookback_minutes: int,
+        live: bool = False,
+        include_partial: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch the most recent minute-based bars (e.g. unit_number=30 for 30m),
+        oldest first. With include_partial=True the last bar is the one
+        still forming.
+        """
+        self._ensure_token()
+
+        end_utc = datetime.now(timezone.utc)
+        start_utc = end_utc - timedelta(minutes=lookback_minutes)
+        payload = {
+            "contractId": contract_id,
+            "live": live,
+            "startTime": start_utc.isoformat().replace("+00:00", "Z"),
+            "endTime": end_utc.isoformat().replace("+00:00", "Z"),
+            "unit": 2,                    # 2 = Minute
+            "unitNumber": unit_number,
+            "limit": 500,
+            "includePartialBar": include_partial,
+        }
+        url = f"{self._base_url}/api/History/retrieveBars"
+        headers = {
+            "accept": "application/json",
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+        }
+
+        resp = self._session.post(url, json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        bars = resp.json().get("bars", []) or []
+        return sorted(bars, key=lambda b: b["t"])
     
     
