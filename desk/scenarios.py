@@ -172,12 +172,16 @@ def load(text: str) -> List[Scenario]:
 
 # ---------- read-back ----------
 
+def _px(x: float) -> str:
+    return f"{x:.2f}".rstrip("0").rstrip(".")
+
+
 def _lv(ref: Level, levels: Optional[Dict[str, float]]) -> str:
     ref = normalize_level(ref)
     if isinstance(ref, float):
-        return f"{ref:g}"
+        return _px(ref)
     if levels and ref in levels:
-        return f"{ref} {levels[ref]:g}"
+        return f"{ref} {_px(levels[ref])}"
     return str(ref)
 
 
