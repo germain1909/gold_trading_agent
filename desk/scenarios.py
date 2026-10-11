@@ -209,6 +209,13 @@ def describe(sc: Scenario, levels: Optional[Dict[str, float]] = None) -> str:
             toward = ("up" if not up else "down") if sc.type == "fade" else ("up" if up else "down")
             lines.append(f"  Condition: the day is {toward} at least {c['day_range_pct']:g}% of its ATR from the open")
 
+    if sc.type == "fade":
+        if not any("stretched" in c for c in sc.conditions):
+            lines.append("  Condition: stretched (built into a fade)")
+        if not any("day_range_pct" in c for c in sc.conditions):
+            lines.append(f"  Condition: the day is {'up' if not up else 'down'} at least 50% of its ATR "
+                         f"from the open (built into a fade)")
+
     L = lv(sc.level) if sc.level is not None else None
     trig = {
         "fade": f"rejects {L} with {'a pattern' if sc.rejection == 'pattern' else 'a pattern or a real wick'}, "
