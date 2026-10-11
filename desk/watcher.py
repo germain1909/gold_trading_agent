@@ -133,9 +133,20 @@ class LevelWatcher:
         self.plan_done = False
         self.plan_lock = threading.Lock()
         self.history: List[Dict[str, Any]] = []          # closed 30m candles for the plan symbol, oldest first
+        self.notifier = None
+        self.broker = None
+        self.last_live_poll = 0.0
         if plan_path:
             from .scenarios import load
+            from .slack_notifier import SlackNotifier
+            from .broker import LiveBroker
             self.plan = load(open(plan_path).read())
+            self.notifier = SlackNotifier()
+            self.broker = LiveBroker(self.client, self.notifier)      # mode from LIVE_TRADING (default off)
+            print(f"{BOLD}{RED if self.broker.live else ''}Broker: {self.broker.describe()}{RESET}")
+            if self.broker.live and self.broker.any_position():
+                print(f"{RED}{BOLD}The account already has an open position - live entries are blocked "
+                      f"until it is flat{RESET}")
 
     # ---------- levels ----------
 
@@ -324,7 +335,10 @@ class LevelWatcher:
         if cid != watched:
             print(f"{RED}Plan: levels are from {cid} but the watcher streams {watched} - check the contract roll{RESET}")
         name = next(info["name"] for info in self.contracts.values() if info["symbol"] == self.plan_symbol)
-        self.runner = PlanRunner(self.plan, levels, day_open, day_atr, self.plan_symbol, name, d)
+        self.runner = PlanRunner(self.plan, levels, day_open, day_atr, self.plan_symbol, name, d,
+                                 notifier=self.notifier, broker=self.broker)
+        if self.broker:
+            self.broker.session_start = start            # the live daily loss stop counts fills from here
         m = re.search(r"\d{4}-\d{2}-\d{2}", self.plan_path or "")
         if m and m.group(0) != d.isoformat():
             warn = f"plan file is for {m.group(0)} but today's session is {d}"
@@ -349,6 +363,20 @@ class LevelWatcher:
                 self.ensure_runner(live_last=True)
             if self.runner and not self.runner.ended:
                 self.runner.on_candle(self.plan_context(), len(self.history) - 1)
+
+    def check_live(self) -> None:
+        """Every 5 seconds while a live position is open: has Topstep closed it? Flatten at 16:55 ET."""
+        if not self.runner or self.runner.ended or not self.runner.position or not self.runner.position.get("live"):
+            return
+        if time.time() - self.last_live_poll < 5:
+            return
+        self.last_live_poll = time.time()
+        from .replay import ET
+        now = datetime.now(ET)
+        with self.plan_lock:
+            if (now.hour, now.minute) >= (16, 55) and now.hour < 18:
+                self.broker.flatten("16:55 ET - flat before the close")
+            self.runner.poll_live()
 
     def check_end_of_day(self) -> None:
         """Wrap up the plan at the 17:00 ET close."""
@@ -415,6 +443,7 @@ class LevelWatcher:
                 self.refresh_levels()
                 self.close_due_candles()
                 self.flush_prices()
+                self.check_live()
                 self.check_end_of_day()
                 stale = time.time() - self.last_message_at > STALE_STREAM_SECONDS
                 token_old = time.time() - self.token_at > TOKEN_MAX_AGE_SECONDS

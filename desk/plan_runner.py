@@ -15,8 +15,14 @@ The watcher feeds it closed 30m candles (on_candle) and live trade prices
 Replay a past day through exactly the same code (no SignalR needed):
     python -m desk.plan_runner plans/2026-10-12.json 2026-10-09
     python -m desk.plan_runner plans/2026-10-12.json 2026-10-09 --slack    # also post to Slack
+
+Live trading: scenarios with "mode": "live" go through desk.broker when
+LIVE_TRADING=true (real orders) or dryrun (print/Slack the order only).
+Replays are always forced to dryrun - they never send real orders.
 """
+import os
 import sys
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, date
 from typing import Dict, Any, List, Optional
@@ -72,12 +78,13 @@ def build_day_levels(client: TopstepClient, symbol: str, d: date, day_open: floa
 class PlanRunner:
     def __init__(self, scenarios: List[Scenario], levels: Dict[str, float], day_open: float, day_atr: float,
                  symbol: str, contract: str, day: date, notifier: Optional[SlackNotifier] = None,
-                 cfg: Optional[RiskConfig] = None, quiet: bool = False):
+                 cfg: Optional[RiskConfig] = None, quiet: bool = False, broker=None):
         self.cfg = cfg or RiskConfig()
         self.notifier = notifier or SlackNotifier()
         self.symbol, self.contract, self.day = symbol, contract, day
         self.levels, self.day_open, self.day_atr = levels, day_open, day_atr
         self.quiet = quiet
+        self.broker = broker
         self.watches: List[ScenarioWatch] = []
         self.position: Optional[Dict[str, Any]] = None
         self.taken: Dict[str, int] = defaultdict(int)
@@ -98,6 +105,11 @@ class PlanRunner:
         key = ["pdVAH", "pdPOC", "pdVAL", "open", "weekly high", "weekly low"]
         level_txt = [f"{k} {_px(levels[k])}" for k in key if k in levels]
         self._say(f"{BOLD}Plan armed for {day} ({contract}): {len(self.watches)} scenario(s){RESET}")
+        live = [w.sc.name for w in self.watches if w.sc.mode == "live"]
+        if live:
+            how = broker.describe() if broker else "no broker - these will paper trade"
+            self._say(f"{RED}{BOLD}Live scenarios: {', '.join(live)} - {how}{RESET}")
+            armed_lines.append(f"LIVE: {', '.join(live)} - {how}")
         for line in armed_lines:
             self._say(f"  {line}")
         self.notifier.send_session_started(symbol, contract, day.isoformat(), level_txt, armed_lines)
@@ -146,7 +158,19 @@ class PlanRunner:
     def _enter(self, w: ScenarioWatch, sig: Dict[str, Any]) -> None:
         plan = sig["plan"]
         session = session_of(datetime.fromisoformat(sig["t"]))
-        self.position = {"scenario": w.sc.name, "plan": plan, "mode": w.sc.mode, "entry_time": sig["entry_time"]}
+        mode, order = "paper", None
+        if w.sc.mode == "live" and self.broker and self.broker.active:
+            size = self.broker.size
+            per_point = self.broker.tick_value / self.broker.tick * size
+            plan = {**plan, "contracts": size, "contract": self.broker.contract_name,
+                    "risk_usd": plan["risk_pts"] * per_point, "reward_usd": plan["reward_pts"] * per_point}
+            order = self.broker.enter(plan["side"], plan["entry"], plan["stop"], plan["target"], w.sc.name)
+            if order is None:
+                self._say(f"{YELLOW}{w.sc.name} triggered ({sig['detail']}) - live entry refused (see Slack){RESET}")
+                return
+            mode = "dryrun" if order.get("dry") else "live"
+        self.position = {"scenario": w.sc.name, "plan": plan, "mode": mode, "entry_time": sig["entry_time"],
+                         "live": mode == "live", "order": order, "seen_open": False}
         self.taken[session] += 1
         w.took_trade()
         color = GREEN if plan["side"] == "long" else RED
@@ -155,15 +179,15 @@ class PlanRunner:
                   f"{_px(plan['target'])} ({plan['rr']}R)  [{sig['detail']}]")
         self.notifier.send_trade_entered(self.symbol, w.sc.name, plan["side"], plan["contracts"], plan["contract"],
                                          plan["entry"], plan["stop"], plan["target"], plan["rr"],
-                                         plan["risk_usd"], sig["detail"], w.sc.mode)
+                                         plan["risk_usd"], sig["detail"], mode)
 
     # -- prices --
 
     def on_price(self, price: float) -> None:
         """A live trade print. Manages the open paper position."""
         self.last_price = price
-        if not self.position:
-            return
+        if not self.position or self.position.get("live"):
+            return          # live positions are closed by Topstep's bracket; see poll_live()
         p = self.position["plan"]
         long = p["side"] == "long"
         if (price <= p["stop"]) if long else (price >= p["stop"]):
@@ -171,10 +195,37 @@ class PlanRunner:
         elif (price >= p["target"]) if long else (price <= p["target"]):
             self._close(p["target"], "target")
 
-    def _close(self, exit_price: float, how: str) -> None:
+    def poll_live(self) -> None:
+        """For a live position: has Topstep's bracket (or a flatten) closed it? Books the real fills."""
+        pos = self.position
+        if not pos or not pos.get("live") or not self.broker:
+            return
+        try:
+            open_now = self.broker.open_position()
+        except Exception as e:
+            self._say(f"{RED}Could not check the live position: {e}{RESET}")
+            return
+        if open_now:
+            pos["seen_open"] = True
+            return
+        placed = pos["order"]["placed_at"]
+        if not pos["seen_open"] and (datetime.now(placed.tzinfo) - placed).total_seconds() < 20:
+            return          # the market order may not have filled yet
+        since = placed - timedelta(minutes=1)
+        try:
+            fill = self.broker.last_fill(since)
+            pnl = self.broker.realized_since(since)
+        except Exception as e:
+            self._say(f"{RED}Live position is flat but fills couldn't be read: {e}{RESET}")
+            fill, pnl = None, None
+        exit_price = float(fill["price"]) if fill else (self.last_price or pos["plan"]["entry"])
+        self._close(exit_price, "closed on Topstep", pnl_usd=pnl)
+
+    def _close(self, exit_price: float, how: str, pnl_usd: Optional[float] = None) -> None:
         pos, p = self.position, self.position["plan"]
         pnl_pts = (exit_price - p["entry"]) if p["side"] == "long" else (p["entry"] - exit_price)
-        pnl_usd = pnl_pts * self.cfg.point_value * p["contracts"]
+        if pnl_usd is None:
+            pnl_usd = pnl_pts * self.cfg.point_value * p["contracts"]
         self.position = None
         self.day_pnl += pnl_usd
         self.closed.append({"scenario": pos["scenario"], "pnl": pnl_usd})
@@ -193,7 +244,14 @@ class PlanRunner:
     def end_of_day(self) -> None:
         if self.ended:
             return
-        if self.position and self.last_price is not None:
+        if self.position and self.position.get("live") and self.broker:
+            self.broker.flatten("end of day")
+            for _ in range(15):                     # give Topstep a moment to report the flat position
+                self.poll_live()
+                if not self.position:
+                    break
+                time.sleep(1)
+        if self.position and self.last_price is not None and not self.position.get("live"):
             self._close(self.last_price, "end of day")
         self.ended = True
         unused = [w.sc.name for w in self.watches if w.armed]
@@ -216,12 +274,17 @@ def main() -> None:
     notifier = SlackNotifier() if "--slack" in sys.argv else SlackNotifier(token="")
 
     client = TopstepClient()
+    from .broker import LiveBroker
+    # A replay never sends real orders: LIVE_TRADING=true or dryrun both become dryrun here.
+    replay_mode = "dryrun" if os.getenv("LIVE_TRADING", "off").lower() in ("dryrun", "true") else "off"
+    broker = LiveBroker(client, notifier, mode=replay_mode)
     cid = front_month_id(symbol, d)
     start, end = session_window(d, "full")
     candles = [b for b in fetch_bars(client, cid, start - timedelta(days=5), end) if datetime.fromisoformat(b["t"]) < end]
     first = next(k for k, b in enumerate(candles) if datetime.fromisoformat(b["t"]) >= start)
     levels, cid, day_atr = build_day_levels(client, symbol, d, candles[first]["o"])
-    runner = PlanRunner(scenarios, levels, candles[first]["o"], day_atr, symbol, cid.split(".")[-1], d, notifier)
+    runner = PlanRunner(scenarios, levels, candles[first]["o"], day_atr, symbol, cid.split(".")[-1], d, notifier,
+                        broker=broker)
     minute = fetch_bars(client, cid, start, end, minutes=1)
 
     closes = [b["c"] for b in candles]
