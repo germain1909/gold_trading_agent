@@ -14,14 +14,16 @@ recorded quietly so the agent knows a level flipped. No LLM is involved here.
 Run from the project root:
     python -m desk.watcher NQ
     python -m desk.watcher NQ MGC
+    python -m desk.watcher NQ --plan plans/2026-10-12.json   # also run a day's scenarios (paper + Slack)
 """
 import logging
+import re
 import os
 import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 
 from signalrcore.hub_connection_builder import HubConnectionBuilder
@@ -101,7 +103,7 @@ def notify(title: str, message: str) -> None:
 
 
 class LevelWatcher:
-    def __init__(self, symbols: List[str]):
+    def __init__(self, symbols: List[str], plan_path: Optional[str] = None):
         self.client = TopstepClient()
         self.contracts: Dict[str, Dict[str, Any]] = {}   # contract_id -> {symbol, name, tick_size}
         for sym in symbols:
@@ -122,6 +124,18 @@ class LevelWatcher:
         self.connected = False
         self.last_message_at = 0.0
         self.token_at = 0.0
+
+        # Plan mode: run a day's scenarios through the trigger detector (desk.plan_runner)
+        self.plan_path = plan_path
+        self.plan = None
+        self.plan_symbol = symbols[0].upper()
+        self.runner = None
+        self.plan_done = False
+        self.plan_lock = threading.Lock()
+        self.history: List[Dict[str, Any]] = []          # closed 30m candles for the plan symbol, oldest first
+        if plan_path:
+            from .scenarios import load
+            self.plan = load(open(plan_path).read())
 
     # ---------- levels ----------
 
@@ -204,6 +218,8 @@ class LevelWatcher:
             return
         print(f"{DIM}{symbol} {CANDLE_MINUTES}m {local_hm(candle['start'])} closed: "
               f"O {px(candle['o'])} H {px(candle['h'])} L {px(candle['l'])} C {px(candle['c'])}{RESET}")
+        if self.plan and symbol == self.plan_symbol:
+            self.plan_candle_closed(candle)
         for lv in levels:
             result = evaluate_level(lv["price"], candle, prev)
             if result is None:
@@ -250,6 +266,9 @@ class LevelWatcher:
                 continue
             self.latest[info["symbol"]] = (contract_id, float(price))
             self.add_trade(info["symbol"], float(price), float(t.get("volume") or 0), parse_ts(t.get("timestamp")))
+            if self.runner and info["symbol"] == self.plan_symbol:
+                with self.plan_lock:
+                    self.runner.on_price(float(price))
 
     def on_quote(self, args) -> None:
         contract_id, data = args[0], args[1]
@@ -263,6 +282,83 @@ class LevelWatcher:
     def flush_prices(self) -> None:
         for symbol, (contract_id, price) in list(self.latest.items()):
             store.set_price(symbol, contract_id, price)
+
+    # ---------- plan mode ----------
+
+    def load_history(self) -> None:
+        """Closed 30m candles for the last few days, so indicators are warmed up."""
+        from .replay import fetch_bars
+        from datetime import timezone
+        cid = next(cid for cid, info in self.contracts.items() if info["symbol"] == self.plan_symbol)
+        now = datetime.now(timezone.utc)
+        bars = fetch_bars(self.client, cid, now - timedelta(days=6), now)
+        current = bucket_start(time.time())
+        self.history = [{"t": b["t"], "o": b["o"], "h": b["h"], "l": b["l"], "c": b["c"]} for b in bars
+                        if bucket_start(parse_ts(b["t"])) < current]
+        print(f"{DIM}Plan: loaded {len(self.history)} closed {CANDLE_MINUTES}m candles for indicators{RESET}")
+
+    def plan_context(self):
+        from .detector import Context
+        from .indicators import ema_line, bb_basis, atr
+        closes = [c["c"] for c in self.history]
+        r = self.runner
+        return Context(self.history, ema_line(closes), bb_basis(closes), atr(self.history), r.levels,
+                       r.day_open, r.day_atr, CANDLE_MINUTES, r.cfg)
+
+    def ensure_runner(self, live_last: bool) -> None:
+        """Arm the plan once the session has a closed candle. Earlier candles only warm up scenario memory."""
+        if self.runner or self.plan_done or not self.plan:
+            return
+        from datetime import timezone
+        from .plan_runner import PlanRunner, trading_day_for, build_day_levels
+        from .profile import session_window
+        d = trading_day_for(datetime.now(timezone.utc))
+        start, _ = session_window(d, "full")
+        today = [k for k, c in enumerate(self.history) if datetime.fromisoformat(c["t"]) >= start]
+        if not today:
+            return
+        day_open = self.history[today[0]]["o"]
+        print(f"{DIM}Plan: computing levels for {d}...{RESET}")
+        levels, cid, day_atr = build_day_levels(self.client, self.plan_symbol, d, day_open)
+        watched = next(c for c, info in self.contracts.items() if info["symbol"] == self.plan_symbol)
+        if cid != watched:
+            print(f"{RED}Plan: levels are from {cid} but the watcher streams {watched} - check the contract roll{RESET}")
+        name = next(info["name"] for info in self.contracts.values() if info["symbol"] == self.plan_symbol)
+        self.runner = PlanRunner(self.plan, levels, day_open, day_atr, self.plan_symbol, name, d)
+        m = re.search(r"\d{4}-\d{2}-\d{2}", self.plan_path or "")
+        if m and m.group(0) != d.isoformat():
+            warn = f"plan file is for {m.group(0)} but today's session is {d}"
+            print(f"{RED}{BOLD}Plan: {warn}{RESET}")
+            self.runner.notifier.send_message(f":warning: {warn}")
+        ctx = self.plan_context()
+        warm = today[:-1] if live_last else today
+        for k in warm:
+            self.runner.on_candle(ctx, k, warmup=True)
+        if warm:
+            print(f"{DIM}Plan: replayed {len(warm)} earlier candle(s) today to rebuild scenario memory "
+                  f"(no trades from them){RESET}")
+
+    def plan_candle_closed(self, candle: Dict[str, Any]) -> None:
+        from datetime import timezone
+        t = datetime.fromtimestamp(candle["start"], tz=timezone.utc).isoformat()
+        with self.plan_lock:
+            if self.history and self.history[-1]["t"] >= t:
+                return
+            self.history.append({"t": t, "o": candle["o"], "h": candle["h"], "l": candle["l"], "c": candle["c"]})
+            if self.runner is None:
+                self.ensure_runner(live_last=True)
+            if self.runner and not self.runner.ended:
+                self.runner.on_candle(self.plan_context(), len(self.history) - 1)
+
+    def check_end_of_day(self) -> None:
+        """Wrap up the plan at the 17:00 ET close."""
+        if not self.runner or self.runner.ended:
+            return
+        from .replay import ET
+        if 17 <= datetime.now(ET).hour < 18:
+            with self.plan_lock:
+                self.runner.end_of_day()
+            self.plan_done = True
 
     # ---------- connection ----------
 
@@ -307,12 +403,19 @@ class LevelWatcher:
         self.refresh_levels()
         self.connect()
         self.backfill()
+        if self.plan:
+            self.load_history()
+            with self.plan_lock:
+                self.ensure_runner(live_last=False)
+            if not self.runner:
+                print(f"{DIM}Plan: waiting for the session's first candle to close before arming{RESET}")
         try:
             while True:
                 time.sleep(LOOP_SECONDS)
                 self.refresh_levels()
                 self.close_due_candles()
                 self.flush_prices()
+                self.check_end_of_day()
                 stale = time.time() - self.last_message_at > STALE_STREAM_SECONDS
                 token_old = time.time() - self.token_at > TOKEN_MAX_AGE_SECONDS
                 if not self.connected or stale or token_old:
@@ -326,11 +429,20 @@ class LevelWatcher:
 
 def main() -> None:
     logging.getLogger("SignalRCoreClient").setLevel(logging.WARNING)
-    symbols = sys.argv[1:] or ["NQ"]
+    args = sys.argv[1:]
+    plan_path = None
+    if "--plan" in args:
+        k = args.index("--plan")
+        if k + 1 >= len(args):
+            raise SystemExit("--plan needs a file, e.g. --plan plans/2026-10-12.json")
+        plan_path = args[k + 1]
+        args = args[:k] + args[k + 2:]
+    symbols = args or ["NQ"]
     print(f"{BOLD}Level watcher starting for {', '.join(s.upper() for s in symbols)}{RESET}")
     print(f"{DIM}DB: {store.DB_PATH} | {CANDLE_MINUTES}m candles | "
-          f"min rejection strength: {MIN_STRENGTH}{RESET}")
-    LevelWatcher(symbols).run()
+          f"min rejection strength: {MIN_STRENGTH}"
+          f"{f' | plan: {plan_path} (paper)' if plan_path else ''}{RESET}")
+    LevelWatcher(symbols, plan_path).run()
 
 
 if __name__ == "__main__":
