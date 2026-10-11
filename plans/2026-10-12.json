@@ -1,47 +1,51 @@
 [
   {
-    "name": "Asia reclaim VAL",
+    "name": "Support reclaim pdVAL",
     "type": "reclaim",
     "side": "long",
     "level": "pdVAL",
-    "session": "Asia",
-    "until": "03:00",
     "target": "pdVAH",
     "mode": "paper"
   },
   {
-    "name": "NY break of VAH",
+    "name": "Support breaks VAL 10/8",
+    "type": "breakout",
+    "side": "short",
+    "level": "VAL 10/8",
+    "target": 30792,
+    "mode": "paper"
+  },
+  {
+    "name": "NY breakout POC 10/8",
     "type": "breakout",
     "side": "long",
-    "level": "pdVAH",
+    "level": "POC 10/8",
     "session": "NY",
-    "target": "POC 10/8",
+    "target": "VAH 10/8",
     "mode": "paper"
   },
   {
-    "name": "Fade ATR+50%",
-    "type": "fade",
-    "side": "short",
-    "level": "ATR+50%",
-    "conditions": [{"day_range_pct": 50}],
-    "target": "pdVAH",
-    "mode": "paper"
-  },
-  {
-    "name": "Trap below VAL",
+    "name": "Failed breakout POC 10/8",
     "type": "trap",
-    "side": "long",
-    "level": "pdVAL",
+    "side": "short",
+    "level": "POC 10/8",
     "target": "pdPOC",
     "mode": "paper"
   },
   {
-    "name": "London trend down",
-    "type": "continuation_pause",
+    "name": "Fade VAH 10/8",
+    "type": "fade",
     "side": "short",
-    "conditions": [{"price": "below", "level": "pdVAL"}, {"trend": "down"}],
-    "session": "London",
-    "target": "ATR-50%",
+    "level": "VAH 10/8",
+    "target": "POC 10/8",
+    "mode": "paper"
+  },
+  {
+    "name": "Fade ATR-75%",
+    "type": "fade",
+    "side": "long",
+    "level": "ATR-75%",
+    "target": "pdVAL",
     "mode": "paper"
   }
 ]
