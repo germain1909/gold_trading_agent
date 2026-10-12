@@ -77,3 +77,33 @@ def atr(bars: List[dict], length: int = ATR_LENGTH) -> List[Optional[float]]:
         prev = (prev * (length - 1) + trs[i]) / length
         out[i] = prev
     return out
+
+
+def rsi(closes: List[float], length: int = 14) -> List[Optional[float]]:
+    """RSI with Wilder smoothing (TradingView's ta.rsi)."""
+    out: List[Optional[float]] = [None] * len(closes)
+    if len(closes) <= length:
+        return out
+    gains = [max(closes[i] - closes[i - 1], 0.0) for i in range(1, len(closes))]
+    losses = [max(closes[i - 1] - closes[i], 0.0) for i in range(1, len(closes))]
+    avg_gain, avg_loss = sum(gains[:length]) / length, sum(losses[:length]) / length
+
+    def value(g, l):
+        return 100.0 if l == 0 else 100 - 100 / (1 + g / l)
+
+    out[length] = value(avg_gain, avg_loss)
+    for i in range(length + 1, len(closes)):
+        avg_gain = (avg_gain * (length - 1) + gains[i - 1]) / length
+        avg_loss = (avg_loss * (length - 1) + losses[i - 1]) / length
+        out[i] = value(avg_gain, avg_loss)
+    return out
+
+
+def macd(closes: List[float], fast: int = 12, slow: int = 26, signal: int = 9):
+    """MACD line, signal line and histogram (each aligned to closes; None until available)."""
+    f, s = ema(closes, fast), ema(closes, slow)
+    line = [a - b if a is not None and b is not None else None for a, b in zip(f, s)]
+    first = next((i for i, x in enumerate(line) if x is not None), len(line))
+    sig = [None] * first + ema([x for x in line[first:]], signal)
+    hist = [a - b if a is not None and b is not None else None for a, b in zip(line, sig)]
+    return line, sig, hist
