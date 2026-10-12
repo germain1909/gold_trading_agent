@@ -168,3 +168,20 @@ python -m tests.test_patterns && python -m tests.test_risk && python -m tests.te
 ```
 
 Note: the live watcher alerts on level rejections only. It does not yet run the two setups or lock and roll; those exist in the replay.
+
+### Timeframe comparison with a generic plan (8/19-10/9, 37 days)
+
+`plans/generic.json`: eight scenarios on relative levels only (reclaim pdVAL, lose pdVAH,
+breakouts of pdVAH/pdVAL, traps at pdVAH/pdVAL, fades at ATR+/-50%), armed every day, paper.
+A baseline for real daily plans, not the strategy itself.
+
+| Timeframe | Total | Trades | Win % | Max drawdown | Worst day |
+|---|---|---|---|---|---|
+| **30m** | **+$4,384** | 87 | 37% | **-$1,226** | -$598 |
+| 15m | -$1,365 | 97 | 30% | -$2,208 | -$700 |
+| 10m | -$406 | 102 | 32% | -$1,738 | -$685 |
+| 5m | +$2,864 | 114 | 33% | -$1,796 | -$728 |
+
+30m stays. Breakouts need the 30m close (30m +$3,093 vs 5m -$1,380); reversal setups (traps,
+reclaims) did better on 5m - a lead for a "30m setup, 5m entry" test. "Lose pdVAH" was the weakest
+30m scenario (25 trades, 20% win, -$793).

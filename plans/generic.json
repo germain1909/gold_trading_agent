@@ -1,0 +1,10 @@
+[
+  {"name": "Reclaim pdVAL", "type": "reclaim", "side": "long", "level": "pdVAL", "target": "default", "mode": "paper"},
+  {"name": "Lose pdVAH", "type": "lose", "side": "short", "level": "pdVAH", "target": "default", "mode": "paper"},
+  {"name": "Break above pdVAH", "type": "breakout", "side": "long", "level": "pdVAH", "target": "default", "mode": "paper"},
+  {"name": "Break below pdVAL", "type": "breakout", "side": "short", "level": "pdVAL", "target": "default", "mode": "paper"},
+  {"name": "Trap above pdVAH", "type": "trap", "side": "short", "level": "pdVAH", "target": "pdPOC", "mode": "paper"},
+  {"name": "Trap below pdVAL", "type": "trap", "side": "long", "level": "pdVAL", "target": "pdPOC", "mode": "paper"},
+  {"name": "Fade ATR+50%", "type": "fade", "side": "short", "level": "ATR+50%", "target": "default", "mode": "paper"},
+  {"name": "Fade ATR-50%", "type": "fade", "side": "long", "level": "ATR-50%", "target": "default", "mode": "paper"}
+]
