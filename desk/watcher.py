@@ -387,6 +387,12 @@ class LevelWatcher:
             with self.plan_lock:
                 self.runner.end_of_day()
             self.plan_done = True
+            try:
+                from .journal import compute_outcomes
+                n = compute_outcomes(self.runner.day.isoformat(), self.plan_symbol, self.client)
+                print(f"{DIM}Journal: computed {n} shadow outcome(s) for {self.runner.day}{RESET}")
+            except Exception as e:
+                print(f"{RED}Journal: shadow outcomes failed: {e}{RESET}")
 
     # ---------- connection ----------
 

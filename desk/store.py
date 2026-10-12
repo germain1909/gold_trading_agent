@@ -51,6 +51,47 @@ CREATE TABLE IF NOT EXISTS notes (
     text TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+-- Trade journal: every scenario event, whether or not it traded
+CREATE TABLE IF NOT EXISTS scenario_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    day TEXT NOT NULL,                       -- trading day, YYYY-MM-DD
+    symbol TEXT NOT NULL,
+    scenario TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT '',
+    side TEXT NOT NULL DEFAULT '',
+    mode TEXT NOT NULL DEFAULT '',           -- paper / dryrun / live
+    event TEXT NOT NULL,                     -- entered, skipped, refused, failed, closed, expired, invalidated
+    candle_t TEXT NOT NULL DEFAULT '',       -- trigger candle start (ISO, UTC)
+    entry_time TEXT NOT NULL DEFAULT '',     -- trigger candle close (ISO, UTC)
+    detail TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    scenario_json TEXT NOT NULL DEFAULT '{}',
+    plan TEXT NOT NULL DEFAULT '{}',         -- entry / stop / target / size / R
+    context TEXT NOT NULL DEFAULT '{}',      -- the clues at trigger time
+    result TEXT NOT NULL DEFAULT '{}',       -- order info, exit, P&L
+    source TEXT NOT NULL DEFAULT 'live'      -- live (watcher) or replay
+);
+-- What happened after each trigger, computed from 1-minute bars (taken or not)
+CREATE TABLE IF NOT EXISTS trade_outcomes (
+    event_id INTEGER PRIMARY KEY,
+    computed_at TEXT NOT NULL,
+    first_hit TEXT NOT NULL,                 -- target, stop, or open (neither by the close)
+    exit_price REAL,
+    minutes INTEGER,
+    mfe_pts REAL,                            -- best move in the trade's favor
+    mae_pts REAL,                            -- worst move against
+    pnl_pts REAL,
+    pnl_usd_1 REAL                           -- per 1 MNQ
+);
+-- AI write-ups of individual trades
+CREATE TABLE IF NOT EXISTS analyses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    text TEXT NOT NULL
+);
 """
 
 
@@ -201,3 +242,87 @@ def recent_notes(limit: int = 10, symbol: Optional[str] = None) -> List[Dict[str
     args.append(int(limit))
     with connect() as conn:
         return _rows(conn.execute(sql, args).fetchall())
+
+
+# ---------- trade journal ----------
+
+_JSON_COLS = ("scenario_json", "plan", "context", "result")
+
+
+def _decode(row: Dict[str, Any]) -> Dict[str, Any]:
+    for k in _JSON_COLS:
+        if k in row and isinstance(row[k], str):
+            row[k] = json.loads(row[k] or "{}")
+    return row
+
+
+def add_event(day: str, symbol: str, scenario: str, event: str, **fields: Any) -> int:
+    """Record a scenario event. JSON columns (plan, context, result, scenario_json) take dicts."""
+    data = {"created_at": now_iso(), "day": day, "symbol": symbol.upper(), "scenario": scenario, "event": event}
+    for k, v in fields.items():
+        data[k] = json.dumps(v, default=str) if k in _JSON_COLS else ("" if v is None else str(v))
+    cols = ", ".join(data)
+    with connect() as conn:
+        cur = conn.execute(f"INSERT INTO scenario_events ({cols}) VALUES ({', '.join('?' * len(data))})",
+                           list(data.values()))
+    return cur.lastrowid
+
+
+def update_event_result(event_id: int, result: Dict[str, Any]) -> None:
+    with connect() as conn:
+        conn.execute("UPDATE scenario_events SET result = ? WHERE id = ?", (json.dumps(result, default=str), event_id))
+
+
+def events(day: Optional[str] = None, kinds: Optional[List[str]] = None,
+           source: Optional[str] = None) -> List[Dict[str, Any]]:
+    sql = "SELECT * FROM scenario_events WHERE 1=1"
+    args: list = []
+    if day:
+        sql += " AND day = ?"
+        args.append(day)
+    if kinds:
+        sql += f" AND event IN ({', '.join('?' * len(kinds))})"
+        args += kinds
+    if source:
+        sql += " AND source = ?"
+        args.append(source)
+    with connect() as conn:
+        return [_decode(r) for r in _rows(conn.execute(sql + " ORDER BY id", args).fetchall())]
+
+
+def event(event_id: int) -> Optional[Dict[str, Any]]:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM scenario_events WHERE id = ?", (event_id,)).fetchone()
+    return _decode(dict(row)) if row else None
+
+
+def journal_days() -> List[str]:
+    with connect() as conn:
+        return [r["day"] for r in conn.execute("SELECT DISTINCT day FROM scenario_events ORDER BY day DESC")]
+
+
+def set_outcome(event_id: int, result: Dict[str, Any]) -> None:
+    cols = ["first_hit", "exit_price", "minutes", "mfe_pts", "mae_pts", "pnl_pts", "pnl_usd_1"]
+    with connect() as conn:
+        conn.execute(f"INSERT OR REPLACE INTO trade_outcomes (event_id, computed_at, {', '.join(cols)}) "
+                     f"VALUES (?, ?, {', '.join('?' * len(cols))})",
+                     [event_id, now_iso()] + [result.get(c) for c in cols])
+
+
+def outcome(event_id: int) -> Optional[Dict[str, Any]]:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM trade_outcomes WHERE event_id = ?", (event_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def add_analysis(event_id: int, model: str, text: str) -> int:
+    with connect() as conn:
+        cur = conn.execute("INSERT INTO analyses (event_id, model, created_at, text) VALUES (?, ?, ?, ?)",
+                           (event_id, model, now_iso(), text))
+    return cur.lastrowid
+
+
+def analyses(event_id: int) -> List[Dict[str, Any]]:
+    with connect() as conn:
+        return _rows(conn.execute("SELECT * FROM analyses WHERE event_id = ? ORDER BY id DESC",
+                                  (event_id,)).fetchall())

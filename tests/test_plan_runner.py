@@ -28,12 +28,12 @@ RECLAIM = {"name": "reclaim VAL", "type": "reclaim", "side": "long", "level": "p
 OHLC = [(105, 106, 103, 104), (104, 104, 98, 99), (99, 103, 98.5, 102)]
 
 
-def make(scenarios, ohlc=OHLC, levels=None, **ctx_kw):
+def make(scenarios, ohlc=OHLC, levels=None, journal=False, **ctx_kw):
     slack = FakeSlack()
     lv = levels or {"pdVAL": 100.0}
     ctx = ctx_for(ohlc, levels=lv, **ctx_kw)
     runner = PlanRunner([from_dict(s) for s in scenarios], lv, 100.0, 400.0, "NQ", "Z26",
-                        date(2026, 10, 12), slack, CFG, quiet=True)
+                        date(2026, 10, 12), slack, CFG, quiet=True, journal=journal)
     return runner, ctx, slack
 
 

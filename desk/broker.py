@@ -60,6 +60,7 @@ class LiveBroker:
         self.max_trades = int(os.getenv("LIVE_MAX_TRADES", 4))
         self.size = min(HARD_MAX_SIZE, int(os.getenv("LIVE_MAX_SIZE", 1)))
         self.trades_today = 0
+        self.last_error: Optional[str] = None         # why the last entry was refused or failed
         self.session_start: Optional[datetime] = None
         self.account_id = None
         self.contract = None
@@ -169,6 +170,7 @@ class LiveBroker:
         """Market order with an OCO stop/target bracket. Returns the order info, or None if refused."""
         reason = self.blocked()
         if reason:
+            self.last_error = f"refused: {reason}"
             self.notifier.send_message(f":no_entry: Live entry refused ({tag}): {reason}")
             return None
         stop_ticks = round(abs(ref_price - stop) / self.tick)
@@ -181,6 +183,7 @@ class LiveBroker:
         elif target_ticks < 1:
             reason = "target is not beyond entry"
         if reason:
+            self.last_error = f"refused: {reason}"
             self.notifier.send_message(f":no_entry: Live entry refused ({tag}): {reason}")
             return None
 
@@ -211,6 +214,7 @@ class LiveBroker:
         try:
             data = self._post("/api/Order/place", payload)
         except Exception as e:
+            self.last_error = f"failed: {e}"
             self.notifier.send_message(f":rotating_light: LIVE ORDER FAILED ({tag}): {e}")
             return None
         self.trades_today += 1

@@ -28,9 +28,10 @@ from datetime import datetime, timedelta, date
 from typing import Dict, Any, List, Optional
 
 from topstep.client import TopstepClient
+from . import store
 from .atr_levels import fetch_daily_bars, atr_levels
 from .backtest import front_month_id, LOOKBACK
-from .detector import Context, ScenarioWatch
+from .detector import Context, ScenarioWatch, trend_len
 from .indicators import ema_line, bb_basis, atr
 from .profile import volume_profile, session_window
 from .replay import fetch_bars, ET
@@ -73,18 +74,61 @@ def build_day_levels(client: TopstepClient, symbol: str, d: date, day_open: floa
     return day_levels(d, trading_days, profiles, daily, day_open, day_atr), cid, day_atr
 
 
+# ---------- journal context ----------
+
+CONFLUENCE_PTS = 25      # an ATR line this close to the scenario's level counts as confluence
+
+
+def trade_context(ctx: Context, i: int, level_price: Optional[float], levels: Dict[str, float],
+                  day_open: float, day_atr: float) -> Dict[str, Any]:
+    """The clues at the trigger candle, recorded with every journal event."""
+    c = ctx.candles[i]
+    price = c["c"]
+    t = datetime.fromisoformat(c["t"])
+    atr30, basis, ema = ctx.atr[i], ctx.basis[i], ctx.ema[i]
+    atr_lines = {k: v for k, v in levels.items() if k.startswith("ATR")}
+    other = {k: v for k, v in levels.items() if not k.startswith("ATR")}
+    near_atr = min(atr_lines.items(), key=lambda kv: abs(kv[1] - price)) if atr_lines else None
+    near_lvl = min(other.items(), key=lambda kv: abs(kv[1] - price)) if other else None
+    out = {
+        "time_et": t.astimezone(ET).strftime("%H:%M"),
+        "session": session_of(t),
+        "close": price,
+        "candle": {k: c[k] for k in ("o", "h", "l", "c")},
+        "day_range_pct": round((price - day_open) / day_atr * 100) if day_atr else None,
+        "stretch_atr": round((price - basis) / atr30, 2) if atr30 and basis is not None else None,
+        "position_vs_lines": ("above both" if ema is not None and basis is not None and price > max(ema, basis)
+                              else "below both" if ema is not None and basis is not None and price < min(ema, basis)
+                              else "between"),
+        "trend_up_candles": trend_len(ctx, i, "long"),
+        "trend_down_candles": trend_len(ctx, i, "short"),
+        "atr30": round(atr30, 1) if atr30 else None,
+        "nearest_atr_line": {"label": near_atr[0], "dist": round(near_atr[1] - price, 2)} if near_atr else None,
+        "nearest_level": {"label": near_lvl[0], "dist": round(near_lvl[1] - price, 2)} if near_lvl else None,
+    }
+    if level_price is not None and atr_lines:
+        k, v = min(atr_lines.items(), key=lambda kv: abs(kv[1] - level_price))
+        out["level_price"] = level_price
+        out["confluence"] = {"atr_line": k, "dist": round(v - level_price, 2),
+                             "yes": abs(v - level_price) <= CONFLUENCE_PTS}
+    return out
+
+
 # ---------- the runner ----------
 
 class PlanRunner:
     def __init__(self, scenarios: List[Scenario], levels: Dict[str, float], day_open: float, day_atr: float,
                  symbol: str, contract: str, day: date, notifier: Optional[SlackNotifier] = None,
-                 cfg: Optional[RiskConfig] = None, quiet: bool = False, broker=None):
+                 cfg: Optional[RiskConfig] = None, quiet: bool = False, broker=None,
+                 source: str = "live", journal: bool = True):
         self.cfg = cfg or RiskConfig()
         self.notifier = notifier or SlackNotifier()
         self.symbol, self.contract, self.day = symbol, contract, day
         self.levels, self.day_open, self.day_atr = levels, day_open, day_atr
         self.quiet = quiet
         self.broker = broker
+        self.source = source            # journal tag: live (watcher) or replay
+        self.journal = journal
         self.watches: List[ScenarioWatch] = []
         self.position: Optional[Dict[str, Any]] = None
         self.taken: Dict[str, int] = defaultdict(int)
@@ -102,6 +146,7 @@ class PlanRunner:
             except ScenarioError as e:
                 self._say(f"{YELLOW}{sc.name}: not armed - {e}{RESET}")
                 self.notifier.send_scenario_invalidated(symbol, sc.name, f"not armed: {e}")
+                self._log(sc, "invalidated", reason=f"not armed: {e}")
         key = ["pdVAH", "pdPOC", "pdVAL", "open", "weekly high", "weekly low"]
         level_txt = [f"{k} {_px(levels[k])}" for k in key if k in levels]
         self._say(f"{BOLD}Plan armed for {day} ({contract}): {len(self.watches)} scenario(s){RESET}")
@@ -118,6 +163,24 @@ class PlanRunner:
         if not self.quiet:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {text}")
 
+    def _log(self, sc: Scenario, event: str, sig: Optional[Dict[str, Any]] = None, mode: str = "",
+             reason: str = "", plan: Optional[Dict[str, Any]] = None, context: Optional[Dict[str, Any]] = None,
+             result: Optional[Dict[str, Any]] = None) -> Optional[int]:
+        """Write one journal row. Never lets a journal problem affect trading."""
+        if not self.journal:
+            return None
+        try:
+            return store.add_event(
+                self.day.isoformat(), self.symbol, sc.name, event,
+                type=sc.type, side=sc.side, mode=mode or sc.mode, source=self.source,
+                candle_t=sig["t"] if sig else "", entry_time=sig["entry_time"].isoformat() if sig else "",
+                detail=sig["detail"] if sig else "", reason=reason, scenario_json=sc.to_dict(),
+                plan=plan if plan is not None else (sig["plan"] if sig else {}),
+                context=context or {}, result=result or {})
+        except Exception as e:
+            self._say(f"{RED}journal write failed: {e}{RESET}")
+            return None
+
     # -- candles --
 
     def on_candle(self, ctx: Context, i: int, warmup: bool = False) -> None:
@@ -130,14 +193,17 @@ class PlanRunner:
             if was_armed and not w.armed and w.status == "expired" and not warmup:
                 self._say(f"{DIM}{w.sc.name}: expired without triggering{RESET}")
                 self.notifier.send_scenario_invalidated(self.symbol, w.sc.name, "expired without triggering")
+                self._log(w.sc, "expired", reason="expired without triggering")
             if not sig or warmup:
                 continue
+            context = trade_context(ctx, i, w.level, self.levels, self.day_open, self.day_atr)
             reason = self._blocked(sig)
             if reason:
                 self._say(f"{YELLOW}{w.sc.name} triggered ({sig['detail']}) - no trade: {reason}{RESET}")
                 self.notifier.send_scenario_skipped(self.symbol, w.sc.name, sig["detail"], reason)
+                self._log(w.sc, "skipped", sig, reason=reason, context=context)
                 continue
-            self._enter(w, sig)
+            self._enter(w, sig, context)
 
     def _blocked(self, sig: Dict[str, Any]) -> Optional[str]:
         plan = sig["plan"]
@@ -155,7 +221,7 @@ class PlanRunner:
             return f"already in a trade ({self.position['scenario']})"
         return None
 
-    def _enter(self, w: ScenarioWatch, sig: Dict[str, Any]) -> None:
+    def _enter(self, w: ScenarioWatch, sig: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> None:
         plan = sig["plan"]
         session = session_of(datetime.fromisoformat(sig["t"]))
         mode, order = "paper", None
@@ -166,11 +232,17 @@ class PlanRunner:
                     "risk_usd": plan["risk_pts"] * per_point, "reward_usd": plan["reward_pts"] * per_point}
             order = self.broker.enter(plan["side"], plan["entry"], plan["stop"], plan["target"], w.sc.name)
             if order is None:
-                self._say(f"{YELLOW}{w.sc.name} triggered ({sig['detail']}) - live entry refused (see Slack){RESET}")
+                why = self.broker.last_error or "refused"
+                self._say(f"{YELLOW}{w.sc.name} triggered ({sig['detail']}) - live entry {why}{RESET}")
+                self._log(w.sc, "failed" if why.startswith("failed") else "refused", sig, mode="live",
+                          reason=why, plan=plan, context=context)
                 return
             mode = "dryrun" if order.get("dry") else "live"
+        event_id = self._log(w.sc, "entered", sig, mode=mode, plan=plan, context=context,
+                             result={"order": {k: v for k, v in (order or {}).items() if k != "payload"}})
         self.position = {"scenario": w.sc.name, "plan": plan, "mode": mode, "entry_time": sig["entry_time"],
-                         "live": mode == "live", "order": order, "seen_open": False}
+                         "live": mode == "live", "order": order, "seen_open": False, "event_id": event_id,
+                         "sc": w.sc, "sig": sig}
         self.taken[session] += 1
         w.took_trade()
         color = GREEN if plan["side"] == "long" else RED
@@ -226,6 +298,16 @@ class PlanRunner:
         pnl_pts = (exit_price - p["entry"]) if p["side"] == "long" else (p["entry"] - exit_price)
         if pnl_usd is None:
             pnl_usd = pnl_pts * self.cfg.point_value * p["contracts"]
+        exit_info = {"exit": exit_price, "how": how, "pnl_pts": round(pnl_pts, 2), "pnl_usd": round(pnl_usd, 2),
+                     "exit_time": datetime.now(ET).isoformat(timespec="seconds"), "entry_event": pos.get("event_id")}
+        if pos.get("sc") is not None:
+            self._log(pos["sc"], "closed", pos.get("sig"), mode=pos["mode"], plan=p, result=exit_info)
+        if pos.get("event_id"):
+            try:
+                entry = store.event(pos["event_id"])
+                store.update_event_result(pos["event_id"], {**(entry or {}).get("result", {}), "exit": exit_info})
+            except Exception as e:
+                self._say(f"{RED}journal update failed: {e}{RESET}")
         self.position = None
         self.day_pnl += pnl_usd
         self.closed.append({"scenario": pos["scenario"], "pnl": pnl_usd})
@@ -284,7 +366,7 @@ def main() -> None:
     first = next(k for k, b in enumerate(candles) if datetime.fromisoformat(b["t"]) >= start)
     levels, cid, day_atr = build_day_levels(client, symbol, d, candles[first]["o"])
     runner = PlanRunner(scenarios, levels, candles[first]["o"], day_atr, symbol, cid.split(".")[-1], d, notifier,
-                        broker=broker)
+                        broker=broker, source="replay", journal="--no-journal" not in sys.argv)
     minute = fetch_bars(client, cid, start, end, minutes=1)
 
     closes = [b["c"] for b in candles]
