@@ -4,7 +4,9 @@ Trading desk journal UI - a local web app over the trade journal.
     python -m desk.ui            # then open http://localhost:8050
 
 Pages:
-    /                 days in the journal, with triggers and shadow P&L
+    /                 every trade on one page, grouped by day and labeled 10/12 #1, 10/12 #2, ...
+    /10_12/1          short link: that day's first trade
+    /days             days in the journal, with triggers and shadow P&L
     /day/<date>       every trigger that day: what the system did and the shadow outcome
     /trade/<id>       one trigger: chart, plan, context, outcome, AI reviews (local or Claude)
     /scorecard        shadow results by scenario type and session (taken or not)
@@ -56,7 +58,7 @@ button { background:var(--panel); color:var(--text); border:1px solid var(--line
   cursor:pointer; font:inherit } button:hover { border-color:var(--blue) } button:disabled { opacity:.5; cursor:wait }
 .review { white-space:pre-wrap; line-height:1.6 } #chart { height:420px }
 </style></head><body>
-<header><b>Trading Desk</b><a href="/">Days</a><a href="/scorecard">Scorecard</a></header>
+<header><b>Trading Desk</b><a href="/">All trades</a><a href="/days">Days</a><a href="/scorecard">Scorecard</a></header>
 <main>{{ body|safe }}</main></body></html>"""
 
 
@@ -95,7 +97,56 @@ app.jinja_env.filters["pts"] = fmt_pts
 
 # ---------- pages ----------
 
+def numbered(day: str) -> List[Dict[str, Any]]:
+    """The day's triggers in time order, numbered 1, 2, 3... (the #n in 10/12 #1)."""
+    ts = triggers(day)
+    for n, t in enumerate(ts, 1):
+        t["n"] = n
+        t["label"] = f"{date.fromisoformat(day):%m/%d} #{n}"
+        t["short_url"] = f"/{date.fromisoformat(day):%m_%d}/{n}"
+    return ts
+
+
 @app.route("/")
+def all_trades():
+    groups = [(d, numbered(d)) for d in store.journal_days()]
+    groups = [(d, ts) for d, ts in groups if ts]
+    return page("All trades", """
+<h1>All trades</h1>
+{% if not groups %}<div class="panel dim">No trades in the journal yet. The watcher writes them as scenarios
+trigger; or backfill a day: <code>python -m desk.journal backfill plans/&lt;date&gt;.json &lt;date&gt;</code></div>{% endif %}
+{% for d, ts in groups %}
+<h2><a href="/day/{{ d }}">{{ d }}</a></h2>
+<div class="panel tbl"><table>
+{% for t in ts %}{% set o = t.outcome %}<tr>
+<td><a href="{{ t.short_url }}"><b>{{ t.label }}</b></a></td>
+<td>{{ t.et }}</td>
+<td><a href="{{ t.short_url }}">{{ t.scenario }}</a></td>
+<td>{{ t.side }}</td>
+<td><span class="tag {{ t.event }}">{{ t.event }}</span></td>
+<td>{{ o.first_hit if o else '' }}</td>
+<td class="num {{ 'pos' if o and o.pnl_pts > 0 else 'neg' if o and o.pnl_pts < 0 else '' }}">{{ (o.pnl_pts|pts ~ ' pts') if o else '' }}</td>
+<td class="num">{{ ('$' ~ '{:,.0f}'.format(o.pnl_usd_1)) if o else '' }}</td>
+</tr>{% endfor %}
+</table></div>
+{% endfor %}
+<p class="dim">Each link opens the trade: chart, plan, context, outcome and AI review. Short links work too,
+e.g. <code>/10_12/1</code> for 10/12's first trade.</p>""", groups=groups)
+
+
+@app.route("/<int:month>_<int:dom>/<int:n>")
+def trade_by_label(month, dom, n):
+    """Short links like /10_12/1: that day's nth trade (most recent year if several match)."""
+    for d in store.journal_days():                       # newest first
+        if date.fromisoformat(d).month == month and date.fromisoformat(d).day == dom:
+            ts = numbered(d)
+            if 1 <= n <= len(ts):
+                return trade_view(ts[n - 1]["id"])
+            abort(404, f"{d} has {len(ts)} trade(s)")
+    abort(404, f"no journal day for {month}/{dom}")
+
+
+@app.route("/days")
 def days():
     rows = []
     for d in store.journal_days():
