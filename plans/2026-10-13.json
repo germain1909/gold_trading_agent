@@ -5,7 +5,7 @@
     "side": "short",
     "level": 30792,
     "target": "default",
-    "mode": "paper"
+    "mode": "live"
   },
   {
     "name": "Weekly low stop-run (trap)",
@@ -13,7 +13,7 @@
     "side": "long",
     "level": 30792,
     "target": "pdPOC",
-    "mode": "paper"
+    "mode": "live"
   },
   {
     "name": "Reclaim pdVAL",
@@ -21,7 +21,7 @@
     "side": "long",
     "level": "pdVAL",
     "target": "pdVAH",
-    "mode": "paper"
+    "mode": "live"
   },
   {
     "name": "Break above pdVAH",
@@ -29,7 +29,7 @@
     "side": "long",
     "level": "pdVAH",
     "target": "VAH 10/9",
-    "mode": "paper"
+    "mode": "live"
   },
   {
     "name": "Fade Friday VAH",
@@ -37,7 +37,7 @@
     "side": "short",
     "level": "VAH 10/9",
     "target": "pdPOC",
-    "mode": "paper"
+    "mode": "live"
   },
   {
     "name": "Fade 31370 (VAH 10/7)",
@@ -45,6 +45,6 @@
     "side": "short",
     "level": 31370,
     "target": "POC 10/8",
-    "mode": "paper"
+    "mode": "live"
   }
 ]

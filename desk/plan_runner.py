@@ -51,9 +51,12 @@ def _px(x: float) -> str:
 # ---------- levels for a trading day ----------
 
 def trading_day_for(now: datetime) -> date:
-    """The CME trading day `now` belongs to (sessions open at 18:00 ET the day before)."""
+    """
+    The CME trading day `now` belongs to. Sessions open at 18:00 ET the day before; the 17:00-18:00
+    break counts as the next day, so a watcher started after the close arms the coming session.
+    """
     et = now.astimezone(ET)
-    d = et.date() + timedelta(days=1) if et.hour >= 18 else et.date()
+    d = et.date() + timedelta(days=1) if et.hour >= 17 else et.date()
     while d.weekday() >= 5:
         d += timedelta(days=1)
     return d
