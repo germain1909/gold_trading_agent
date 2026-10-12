@@ -184,6 +184,10 @@ class LiveBroker:
             self.notifier.send_message(f":no_entry: Live entry refused ({tag}): {reason}")
             return None
 
+        # Topstep wants bracket ticks signed as an offset from the fill price:
+        # long -> target above (+), stop below (-); short -> target below (-), stop above (+).
+        # (Unsigned ticks were rejected live: "Ticks should be less than zero when going short.")
+        direction = 1 if side == "long" else -1
         payload = {
             "accountId": self.account_id,
             "contractId": self.contract,
@@ -194,8 +198,8 @@ class LiveBroker:
             "stopPrice": None,
             "trailPrice": None,
             "customTag": f"{tag[:40]}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
-            "stopLossBracket": {"ticks": stop_ticks, "type": ORDER_STOP},
-            "takeProfitBracket": {"ticks": target_ticks, "type": ORDER_LIMIT},
+            "stopLossBracket": {"ticks": -direction * stop_ticks, "type": ORDER_STOP},
+            "takeProfitBracket": {"ticks": direction * target_ticks, "type": ORDER_LIMIT},
         }
         summary = (f"{side.upper()} {self.size} {self.contract_name} market, stop {stop_ticks} ticks "
                    f"(-${risk_usd:,.0f}), target {target_ticks} ticks")

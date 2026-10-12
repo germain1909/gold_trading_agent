@@ -89,8 +89,17 @@ def test_dryrun_builds_the_bracket_order_but_never_sends_it():
     p = order["payload"]
     assert order["dry"] and "/api/Order/place" not in paths(client)
     assert p["contractId"] == "CON.F.US.MNQ.Z26" and p["size"] == 1 and p["side"] == 0 and p["type"] == 2
-    assert p["stopLossBracket"] == {"ticks": 40, "type": 4} and p["takeProfitBracket"] == {"ticks": 80, "type": 1}
+    # long: stop below the fill (negative ticks), target above (positive)
+    assert p["stopLossBracket"] == {"ticks": -40, "type": 4} and p["takeProfitBracket"] == {"ticks": 80, "type": 1}
     assert "DRY RUN" in slack.sent[-1]
+
+
+def test_short_bracket_ticks_are_signed_the_other_way():
+    # The live failure on 10/12: "Invalid take profit ticks (675). Ticks should be less than zero when going short."
+    b, _, _ = make("dryrun")
+    p = b.enter("short", 30960.75, 30987.0, 30792.0, "Support breaks VAL 10/8")["payload"]
+    assert p["side"] == 1
+    assert p["takeProfitBracket"]["ticks"] == -675 and p["stopLossBracket"]["ticks"] == 105
 
 
 def test_live_places_one_bracketed_order():
@@ -99,7 +108,8 @@ def test_live_places_one_bracketed_order():
     assert order["orderId"] == 9056 and b.trades_today == 1
     placed = [j for p, j in client._session.calls if p == "/api/Order/place"][0]
     assert placed["side"] == 1 and placed["size"] == 1
-    assert placed["stopLossBracket"]["type"] == 4 and placed["takeProfitBracket"]["type"] == 1
+    assert placed["stopLossBracket"] == {"ticks": 40, "type": 4}         # short: stop above (+)
+    assert placed["takeProfitBracket"] == {"ticks": -80, "type": 1}      # short: target below (-)
 
 
 def test_size_is_hard_capped_at_one():
