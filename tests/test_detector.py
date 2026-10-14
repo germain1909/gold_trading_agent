@@ -52,6 +52,21 @@ def test_breakout_needs_momentum():
     assert sig is None
 
 
+def test_breakout_stop_buffer_keeps_stop_off_the_level():
+    import desk.detector as det
+    sc = {"name": "b", "type": "breakout", "side": "short", "level": 100, "target": 40}
+    ohlc = [(103, 104, 100.5, 101), (101, 102, 88, 89)]           # midpoint 95 is below the level
+    sig, _ = run(sc, ctx_for(ohlc))
+    assert sig["plan"]["stop"] == 102                             # original rule: level + 2
+    old = det.BREAKOUT_STOP_ATR
+    det.BREAKOUT_STOP_ATR = 0.5                                   # ATR 20 -> at least 10 pts beyond the level
+    try:
+        sig, _ = run(sc, ctx_for(ohlc))
+        assert sig["plan"]["stop"] == 110
+    finally:
+        det.BREAKOUT_STOP_ATR = old
+
+
 def test_retest_after_break_and_failed_break_resets():
     sc = {"name": "rt", "type": "retest", "side": "long", "level": 100, "target": 140}
     sig, _ = run(sc, ctx_for([(97, 100, 96, 99), (99.5, 112, 99, 111), (111, 112, 99.5, 108)]))

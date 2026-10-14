@@ -11,6 +11,7 @@ The same code runs on past candles (desk.scenario_test) and live candles (the
 watcher), so a scenario behaves the same in a backtest and in real time.
 """
 import math
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
@@ -26,6 +27,7 @@ from .setups import STRETCH_MIN, CROSS_MIN_PRIOR, CROSS_BREAKOUT_BODY_ATR
 ET = ZoneInfo("America/New_York")
 
 BREAK_BODY_ATR = 0.5          # "breaks": body at least half the 30m ATR
+BREAKOUT_STOP_ATR = float(os.getenv("BREAKOUT_STOP_ATR", 0))   # min breakout stop distance beyond the level, in 30m ATRs
 RETEST_WINDOW = 6             # candles after a break in which a retest counts
 TRAP_WINDOW = 2               # candles after a break in which a close back inside is a trap
 TREND_MIN = 3                 # "trending": closes beyond both lines in a row
@@ -265,6 +267,11 @@ class ScenarioWatch:
                     and momentum(ctx, i, self.side):
                 mid = (c["h"] + c["l"]) / 2
                 stop = min(L, mid) - buf if self.long else max(L, mid) + buf
+                # Optional: keep the stop at least BREAKOUT_STOP_ATR x 30m ATR beyond the level, so a
+                # retest of the broken level doesn't take it out (0 = off, the original rule).
+                if BREAKOUT_STOP_ATR and ctx.atr[i]:
+                    floor = BREAKOUT_STOP_ATR * ctx.atr[i]
+                    stop = min(stop, L - floor) if self.long else max(stop, L + floor)
                 return stop, f"broke {'above' if self.long else 'below'} {_p(L)} with momentum"
             return None
 
