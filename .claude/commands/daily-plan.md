@@ -47,8 +47,9 @@ confluences. If it says the prior session's levels are PROVISIONAL, say so in th
   only for a reason.
 
 ## 5. Write and validate the plan file
-- Save the scenarios to `plans/<day>.json` with every scenario `"mode": "paper"`. Never set `"live"` -
-  the trader does that. If the file already exists, show the differences and ask before overwriting.
+- Save the scenarios to `plans/<day>.json` with every scenario `"mode": "live"` - the trader's
+  default is live. Use `"paper"` only for a scenario the trader asked to keep on paper. If the file
+  already exists, show the differences and ask before overwriting.
 - Validate and read back with:
 
       ~/venvs/py310/bin/python -c "from desk.scenarios import load, describe; [print(describe(s)+'\n') for s in load(open('plans/<day>.json').read())]"
@@ -57,7 +58,8 @@ confluences. If it says the prior session's levels are PROVISIONAL, say so in th
 
 ## 6. Report
 Give the trader: the analysis, the levels table, the scenarios with reasoning, the read-back, and the
-next steps - mark scenarios live if wanted, then restart the watcher before 18:00 ET:
+next steps - say which scenarios should be paper instead, then restart the watcher before 18:00 ET
+(or let a running watcher pick up `plans/<day>.json` automatically when the session arms):
 
     pkill -f desk.watcher
     nohup caffeinate -ims python -u -m desk.watcher NQ --plan plans/<day>.json > watcher.log 2>&1 &

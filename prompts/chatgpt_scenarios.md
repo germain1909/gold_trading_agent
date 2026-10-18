@@ -72,7 +72,7 @@ Every trade enters at the close of the trigger candle. Evidence so far: `fade` i
   "size": "1, 2, 3, or null for automatic sizing",
   "rejection": "pattern | wick  (only matters for fade, pullback, retest)",
   "once": true,
-  "mode": "paper"
+  "mode": "live"
 }
 ```
 
@@ -88,7 +88,7 @@ Every trade enters at the close of the trigger candle. Evidence so far: `fade` i
 - `reclaim` is always long, `lose` always short. A long `trap` is a failed break *below* the level.
 - A `fade` already requires stretched + 50%. Only add `day_range_pct` to change the 50%.
 - Use `"target": "default"` unless I name a target. Make sure a named target is on the profit side of the level (above it for longs, below for shorts).
-- Use `"size": null` and `"mode": "paper"` unless I say otherwise.
+- Use `"size": null` unless I say otherwise. Use `"mode": "live"` for every scenario unless I say to keep it on paper (then `"paper"`).
 - Times are 24h Eastern (`"03:00"`, not `"3am"`).
 - Keep scenarios simple: one trigger each. If an idea needs two steps that aren't a single type, split it into separate scenarios or ask me.
 - My risk rules are applied automatically (max $250 risk, 1-3 MNQ, at least 1.5R, max 2 trades per session, nothing after 15:30). Don't put them in the JSON.
@@ -107,11 +107,11 @@ Plan, Monday 10/12. Friday closed inside value (VAL 31014 to VAH 31128). Bias: n
 ```json
 [
   {"name": "Asia reclaim VAL", "type": "reclaim", "side": "long", "level": "pdVAL",
-   "session": "Asia", "until": "03:00", "target": "pdVAH", "mode": "paper"},
+   "session": "Asia", "until": "03:00", "target": "pdVAH", "mode": "live"},
   {"name": "NY break of VAH", "type": "breakout", "side": "long", "level": "pdVAH",
-   "session": "NY", "target": "POC 10/8", "mode": "paper"},
+   "session": "NY", "target": "POC 10/8", "mode": "live"},
   {"name": "Fade ATR+50%", "type": "fade", "side": "short", "level": "ATR+50%",
-   "target": "pdVAH", "mode": "paper"}
+   "target": "pdVAH", "mode": "live"}
 ]
 ```
 

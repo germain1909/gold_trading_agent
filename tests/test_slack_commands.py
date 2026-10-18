@@ -137,6 +137,24 @@ def test_invalid_edit_never_reaches_the_file():
         assert "'reclaim' is a long" in reply and read(state["path"]) == before and cmds.pending is None
 
 
+def test_drafts_default_to_live_but_respect_paper():
+    import desk.plan_ai as ai
+    d = {"name": "x", "type": "reclaim", "side": "long", "level": "pdVAL", "mode": "paper"}
+    assert ai.DEFAULT_MODE == "live" and ai._validate([d])[0]["mode"] == "live"    # Claude's mode is overridden
+    assert ai._validate([d], mode="paper")[0]["mode"] == "paper"
+    calls = {}
+    old = ai._ask_validated
+    ai._ask_validated = lambda system, prompt, single, mode="live": (calls.setdefault("mode", mode), ("", [d]))[1]
+    try:
+        ai.scenario_from_text("keep this one on paper: reclaim pdVAL")
+        assert calls["mode"] == "paper"
+        calls.clear()
+        ai.scenario_from_text("reclaim pdVAL long")
+        assert calls["mode"] == "live"
+    finally:
+        ai._ask_validated = old
+
+
 def test_reload_keeps_unchanged_scenarios_and_the_position():
     runner, ctx, _ = make([RECLAIM, {**RECLAIM, "name": "other"}])
     for i in range(len(ctx.candles)):

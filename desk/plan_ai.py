@@ -6,8 +6,9 @@ Claude drafts scenarios and plans for the trading desk.
 
 Claude gets the playbook (SCENARIOS.md) as its rules, and every scenario it returns
 must pass the desk's own validator (desk.scenarios). If it doesn't, Claude gets the
-validator's error back and one more try. Drafts are always "paper"; going live is the
-trader's decision.
+validator's error back and one more try. Drafts default to "live" (the trader's choice:
+most scenarios trade live; say "paper" to keep one on paper). Every draft is still read
+back and needs `confirm` before it is saved.
 
 Needs ANTHROPIC_API_KEY in .env (or an `ant auth login` profile).
 """
@@ -28,6 +29,7 @@ load_dotenv()
 
 MODEL = os.getenv("PLAN_AI_MODEL", os.getenv("ANALYST_CLAUDE_MODEL", "claude-opus-5-5"))
 EFFORT = os.getenv("PLAN_AI_EFFORT", "medium")
+DEFAULT_MODE = os.getenv("PLAN_DEFAULT_MODE", "live")
 
 EVIDENCE = """Backtest evidence so far (30-minute candles, 1-3 MNQ, Aug-Oct 2026):
 - Breakouts of the prior day's VAH/VAL were the strongest generic scenarios (37 trades, ~46% win).
@@ -73,11 +75,11 @@ def _json_block(text: str) -> Any:
     return json.loads(m.group(1))
 
 
-def _validate(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _validate(items: List[Dict[str, Any]], mode: str = DEFAULT_MODE) -> List[Dict[str, Any]]:
     out = []
     names = set()
     for d in items:
-        d = {**d, "mode": "paper"}                       # drafts are never live
+        d = {**d, "mode": mode}                          # the mode is the trader's call, not Claude's
         from_dict(dict(d))                               # raises ScenarioError with a usable message
         if d["name"] in names:
             raise ScenarioError(f"two scenarios are named '{d['name']}' - names must be unique")
@@ -86,7 +88,7 @@ def _validate(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-def _ask_validated(system: str, prompt: str, single: bool) -> Tuple[str, List[Dict[str, Any]]]:
+def _ask_validated(system: str, prompt: str, single: bool, mode: str = DEFAULT_MODE) -> Tuple[str, List[Dict[str, Any]]]:
     messages = [{"role": "user", "content": prompt}]
     for attempt in range(2):
         text = _ask(system, messages)
@@ -95,7 +97,7 @@ def _ask_validated(system: str, prompt: str, single: bool) -> Tuple[str, List[Di
             items = [data] if single and isinstance(data, dict) else data
             if not isinstance(items, list):
                 raise ValueError("the JSON must be " + ("one object" if single else "an array"))
-            return text, _validate(items)
+            return text, _validate(items, mode)
         except (ValueError, ScenarioError, json.JSONDecodeError) as e:
             if attempt == 1:
                 raise RuntimeError(f"Claude's draft didn't pass the desk's validator: {e}")
@@ -106,12 +108,13 @@ def _ask_validated(system: str, prompt: str, single: bool) -> Tuple[str, List[Di
 
 
 def scenario_from_text(text: str, levels: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
-    """Turn one plain-English idea into one validated scenario (paper)."""
+    """Turn one plain-English idea into one validated scenario (live unless the idea says "paper")."""
     lv = "\n".join(f"  {k}: {v:.2f}" for k, v in sorted((levels or {}).items(), key=lambda kv: -kv[1])) or "  (unknown)"
     system = _system("Convert the trader's one idea into exactly one scenario. Reply with one short sentence "
                      "restating the scenario in playbook words, then a ```json block containing ONE scenario "
                      "object. If the idea doesn't fit any scenario type, say so instead and give no JSON.")
-    _, items = _ask_validated(system, f"Today's levels:\n{lv}\n\nThe trader's idea: {text}", single=True)
+    mode = "paper" if re.search(r"\bpaper\b", text, re.I) else DEFAULT_MODE
+    _, items = _ask_validated(system, f"Today's levels:\n{lv}\n\nThe trader's idea: {text}", single=True, mode=mode)
     return items[0]
 
 

@@ -4,12 +4,12 @@ change is read back and needs `confirm` before it is written.
 
     help                       this list
     plan                       today's scenarios: mode and status, open position, day P&L
-    add: <idea>                Claude turns the idea into a scenario (paper), read back for confirm
+    add: <idea>                Claude turns the idea into a scenario (LIVE; say "paper" for paper), read back for confirm
     cancel <name>              remove a scenario
     live <name|all>            switch to LIVE (real orders)
     paper <name|all>           switch to paper
     generate [YYYY-MM-DD] [levels...] [notes]
-                               Claude drafts a full plan from the market brief (all paper)
+                               Claude drafts a full plan from the market brief (all LIVE)
     use <YYYY-MM-DD>           point the watcher at plans/<date>.json
     kill / resume              kill switch on / off (blocks new live entries)
     flatten                    cancel working orders and close the live position
@@ -168,8 +168,12 @@ class SlackCommands:
 
         def apply():
             self._write(path, self._read(path) + [d])
-            return f":white_check_mark: Added *{d['name']}* (PAPER). Use `live {d['name']}` to trade it."
-        return self._propose(f"New scenario (PAPER):\n```{self._readback(d)}```", apply)
+            tip = f"`paper {d['name']}` to keep it on paper" if d["mode"] == "live" else f"`live {d['name']}` to trade it"
+            return f":white_check_mark: Added *{d['name']}* ({d['mode'].upper()}). Use {tip}."
+        readback = self._readback(d)                     # validates first: a bad draft is reported, never written
+        mode = d.get("mode", "paper")
+        icon = ":red_circle:" if mode == "live" else ":large_blue_circle:"
+        return self._propose(f"{icon} New scenario ({mode.upper()}):\n```{readback}```", apply)
 
     def _cancel(self, name: str) -> str:
         path = self.get_plan_path()
@@ -218,14 +222,16 @@ class SlackCommands:
 
         def apply():
             self._write(path, items)
-            msg = f":white_check_mark: Saved `plans/{day.isoformat()}.json` ({len(items)} scenarios, all PAPER)."
+            modes = sorted({d.get("mode", "paper").upper() for d in items})
+            msg = f":white_check_mark: Saved `plans/{day.isoformat()}.json` ({len(items)} scenarios, {'/'.join(modes)})."
             if os.path.abspath(path) != os.path.abspath(self.get_plan_path()):
                 msg += (f" The watcher picks it up automatically when the {day} session arms "
                         f"(or `use {day.isoformat()}` to switch now).")
-            return msg + " Use `live <name>` for the ones you want live."
-        lines = "\n".join(f"• {d['name']} - {d['type']} {d['side']} at {d.get('level', '-')}" for d in items)
+            return msg + " Use `paper <name>` for any you want on paper."
+        lines = "\n".join(f"• {d['name']} [{d.get('mode', 'paper').upper()}] - {d['type']} {d['side']} at "
+                          f"{d.get('level', '-')}" for d in items)
         return self._propose(f"*Draft plan for {day}*{' (replaces the existing file)' if exists else ''}\n"
-                             f"{summary}\n\n*Scenarios (PAPER):*\n{lines}", apply)
+                             f"{summary}\n\n*Scenarios:*\n{lines}", apply)
 
     def _use(self, rest: str) -> str:
         day = date.fromisoformat(rest.strip())
