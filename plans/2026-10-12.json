@@ -5,7 +5,7 @@
     "side": "long",
     "level": "pdVAL",
     "target": "pdVAH",
-    "mode": "paper"
+    "mode": "live"
   },
   {
     "name": "Support breaks VAL 10/8",
@@ -13,7 +13,7 @@
     "side": "short",
     "level": "VAL 10/8",
     "target": 30792,
-    "mode": "paper"
+    "mode": "live"
   },
   {
     "name": "NY breakout POC 10/8",
@@ -22,7 +22,7 @@
     "level": "POC 10/8",
     "session": "NY",
     "target": "VAH 10/8",
-    "mode": "paper"
+    "mode": "live"
   },
   {
     "name": "Failed breakout POC 10/8",
@@ -30,7 +30,7 @@
     "side": "short",
     "level": "POC 10/8",
     "target": "pdPOC",
-    "mode": "paper"
+    "mode": "live"
   },
   {
     "name": "Fade VAH 10/8",
@@ -38,7 +38,7 @@
     "side": "short",
     "level": "VAH 10/8",
     "target": "POC 10/8",
-    "mode": "paper"
+    "mode": "live"
   },
   {
     "name": "Fade ATR-75%",
@@ -46,6 +46,6 @@
     "side": "long",
     "level": "ATR-75%",
     "target": "pdVAL",
-    "mode": "paper"
+    "mode": "live"
   }
 ]

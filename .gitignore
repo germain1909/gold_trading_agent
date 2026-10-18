@@ -15,3 +15,7 @@ __pycache__/
 venv
 # Desk database (levels, alerts, notes)
 data/
+
+# Watcher output
+watcher.log
+*.log
