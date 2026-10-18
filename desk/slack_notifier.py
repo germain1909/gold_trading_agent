@@ -75,7 +75,7 @@ class SlackNotifier:
                            entry: float, stop: float, target: float, rr: float, risk_usd: float,
                            detail: str, mode: str = "paper") -> None:
         lines = [
-            f"{self._mention()}:large_{'green' if side == 'long' else 'red'}_circle: "
+            f"{self._mention()}{':large_green_circle:' if side == 'long' else ':red_circle:'} "
             f"*[{symbol} {side.upper()}] {scenario}* ({mode.upper()})",
             f"Why:    {detail}",
             f"Entry:  {_px(entry)}  x{contracts} {contract}",
