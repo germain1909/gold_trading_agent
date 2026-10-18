@@ -324,6 +324,52 @@ class PlanRunner:
             self.notifier.send_daily_limit_hit(f"day P&L at or below -${self.cfg.daily_loss_limit:,.0f}",
                                                self.day_pnl)
 
+    # -- live plan reload --
+
+    def reload(self, scenarios: List[Scenario], ctx: Optional[Context] = None,
+               warm_indices: Optional[List[int]] = None) -> List[str]:
+        """
+        Apply an edited plan without restarting. Unchanged scenarios keep their state; new or changed ones
+        are armed fresh and replay today's earlier candles to rebuild their memory (no trades from that);
+        removed ones are disarmed. An open position is never touched. Returns a line per change.
+        """
+        old = {w.sc.name: w for w in self.watches}
+        kept: List[ScenarioWatch] = []
+        changes: List[str] = []
+        for sc in scenarios:
+            w = old.get(sc.name)
+            if w is not None and w.sc.to_dict() == sc.to_dict():
+                kept.append(w)
+                continue
+            try:
+                nw = ScenarioWatch(sc, self.levels)
+            except ScenarioError as e:
+                changes.append(f"{sc.name}: not armed - {e}")
+                continue
+            if ctx is not None:
+                for k in warm_indices or []:
+                    nw.on_candle(ctx, k)          # rebuilds memory only; any signal is ignored
+            if w is not None and w.status == "triggered" and sc.once:
+                nw.armed, nw.status = False, "triggered"     # a mode/target edit doesn't re-arm a used scenario
+            kept.append(nw)
+            line = describe(sc, self.levels).splitlines()[0].replace("Scenario: ", "")
+            changes.append(f"{'changed' if w is not None else 'added'}: {line} [{sc.mode.upper()}]")
+        names = {sc.name for sc in scenarios}
+        changes += [f"removed: {name}" for name in old if name not in names]
+        self.watches = kept
+        for c in changes:
+            self._say(f"{BOLD}Plan reload - {c}{RESET}")
+        return changes
+
+    def status_lines(self) -> List[str]:
+        lines = [f"{w.sc.name} [{w.sc.mode.upper()}] - {w.status}" for w in self.watches]
+        if self.position:
+            p = self.position["plan"]
+            lines.append(f"OPEN: {self.position['scenario']} {p['side'].upper()} @ {p['entry']} stop {p['stop']} "
+                         f"target {p['target']} ({self.position['mode']})")
+        lines.append(f"Day P&L {self.day_pnl:+,.0f} from {len(self.closed)} closed trade(s)")
+        return lines
+
     # -- end of day --
 
     def end_of_day(self) -> None:

@@ -147,6 +147,23 @@ class LevelWatcher:
             if self.broker.live and self.broker.any_position():
                 print(f"{RED}{BOLD}The account already has an open position - live entries are blocked "
                       f"until it is flat{RESET}")
+        self.plan_mtime = os.path.getmtime(plan_path) if plan_path else None
+        self.last_plan_check = 0.0
+        self.slack_bot = None
+        if plan_path and os.getenv("SLACK_APP_TOKEN") and os.getenv("SLACK_USER_ID") and os.getenv("SLACK_BOT_TOKEN"):
+            from . import plan_ai
+            from .plan_runner import trading_day_for
+            from .slack_bot import SlackBot
+            from .slack_commands import SlackCommands
+            self.commands = SlackCommands(
+                authorized_user=os.getenv("SLACK_USER_ID"),
+                get_plan_path=lambda: self.plan_path, set_plan_path=self.switch_plan,
+                get_runner=lambda: self.runner, say=self.notifier.send_message,
+                trading_day=lambda: trading_day_for(datetime.now(timezone.utc)),
+                ai=plan_ai, broker=self.broker)
+            self.slack_bot = SlackBot(self.commands, os.getenv("SLACK_APP_TOKEN"), os.getenv("SLACK_BOT_TOKEN"))
+        elif plan_path:
+            print(f"{DIM}Slack commands off (set SLACK_APP_TOKEN, SLACK_USER_ID and SLACK_BOT_TOKEN to enable){RESET}")
 
     # ---------- levels ----------
 
@@ -324,6 +341,11 @@ class LevelWatcher:
         from .plan_runner import PlanRunner, trading_day_for, build_day_levels
         from .profile import session_window
         d = trading_day_for(datetime.now(timezone.utc))
+        # Use plans/<day>.json automatically when it exists, so the watcher can run for days.
+        dated = os.path.join(os.path.dirname(os.path.abspath(self.plan_path)), f"{d.isoformat()}.json")
+        if os.path.exists(dated) and os.path.abspath(dated) != os.path.abspath(self.plan_path):
+            self.switch_plan(dated, quiet=True)
+            print(f"{BOLD}Plan: switched to {dated} for the {d} session{RESET}")
         start, _ = session_window(d, "full")
         today = [k for k, c in enumerate(self.history) if datetime.fromisoformat(c["t"]) >= start]
         if not today:
@@ -363,6 +385,57 @@ class LevelWatcher:
                 self.ensure_runner(live_last=True)
             if self.runner and not self.runner.ended:
                 self.runner.on_candle(self.plan_context(), len(self.history) - 1)
+
+    def switch_plan(self, path: str, quiet: bool = False) -> None:
+        """Point the watcher at another plan file; it is (re)loaded on the next check."""
+        self.plan_path = path
+        self.plan_mtime = None                           # forces check_plan_file to load it
+        if not quiet and self.notifier:
+            self.notifier.send_message(f":card_index: Watcher now uses `{os.path.basename(path)}`")
+        self.check_plan_file(force=True)
+
+    def check_plan_file(self, force: bool = False) -> None:
+        """Reload the plan when its file changes (edited by hand, by Claude, or from Slack)."""
+        if not self.plan_path or (not force and time.time() - self.last_plan_check < 3):
+            return
+        self.last_plan_check = time.time()
+        try:
+            mtime = os.path.getmtime(self.plan_path)
+        except OSError:
+            return
+        if not force and mtime == self.plan_mtime:
+            return
+        self.plan_mtime = mtime
+        from .scenarios import load, ScenarioError
+        try:
+            new = load(open(self.plan_path).read())
+        except (ScenarioError, OSError) as e:
+            msg = f"plan file `{os.path.basename(self.plan_path)}` is invalid - keeping the current plan: {e}"
+            print(f"{RED}Plan: {msg}{RESET}")
+            if self.notifier:
+                self.notifier.send_message(f":warning: {msg}")
+            return
+        with self.plan_lock:
+            self.plan = new
+            if not self.runner or self.runner.ended:
+                return
+            from .profile import session_window
+            start, _ = session_window(self.runner.day, "full")
+            warm = [k for k, c in enumerate(self.history) if datetime.fromisoformat(c["t"]) >= start]
+            changes = self.runner.reload(new, self.plan_context(), warm)
+        if changes and self.notifier:
+            self.notifier.send_message(":arrows_counterclockwise: *Plan reloaded*\n" + "\n".join(f"• {c}" for c in changes))
+
+    def check_new_day(self) -> None:
+        """After a session ends, get ready to arm the next one (with plans/<day>.json if it exists)."""
+        if not self.plan or not self.runner or not self.runner.ended:
+            return
+        from .plan_runner import trading_day_for
+        if trading_day_for(datetime.now(timezone.utc)) != self.runner.day:
+            with self.plan_lock:
+                self.runner = None
+                self.plan_done = False
+            print(f"{DIM}Plan: ready for the next session - arms when its first candle closes{RESET}")
 
     def check_live(self) -> None:
         """Every 5 seconds while a live position is open: has Topstep closed it? Flatten at 16:55 ET."""
@@ -443,14 +516,20 @@ class LevelWatcher:
                 self.ensure_runner(live_last=False)
             if not self.runner:
                 print(f"{DIM}Plan: waiting for the session's first candle to close before arming{RESET}")
+        if self.slack_bot:
+            self.slack_bot.start()
+            print(f"{BOLD}Slack commands on - type `help` in the channel{RESET}")
+            self.notifier.send_message(":robot_face: Desk online. Type `help` for commands, `plan` for status.")
         try:
             while True:
                 time.sleep(LOOP_SECONDS)
                 self.refresh_levels()
                 self.close_due_candles()
                 self.flush_prices()
+                self.check_plan_file()
                 self.check_live()
                 self.check_end_of_day()
+                self.check_new_day()
                 stale = time.time() - self.last_message_at > STALE_STREAM_SECONDS
                 token_old = time.time() - self.token_at > TOKEN_MAX_AGE_SECONDS
                 if not self.connected or stale or token_old:
@@ -459,6 +538,8 @@ class LevelWatcher:
                     self.connect()
         except KeyboardInterrupt:
             print("\nStopping watcher…")
+            if self.slack_bot:
+                self.slack_bot.stop()
             self.hub.stop()
 
 
@@ -476,7 +557,7 @@ def main() -> None:
     print(f"{BOLD}Level watcher starting for {', '.join(s.upper() for s in symbols)}{RESET}")
     print(f"{DIM}DB: {store.DB_PATH} | {CANDLE_MINUTES}m candles | "
           f"min rejection strength: {MIN_STRENGTH}"
-          f"{f' | plan: {plan_path} (paper)' if plan_path else ''}{RESET}")
+          f"{f' | plan: {plan_path} (live/paper per scenario; see Broker line)' if plan_path else ''}{RESET}")
     LevelWatcher(symbols, plan_path).run()
 
 
