@@ -19,3 +19,6 @@ data/
 # Watcher output
 watcher.log
 *.log
+
+# Plan PDFs (made on demand)
+plans/*.pdf

@@ -55,6 +55,11 @@ confluences. If it says the prior session's levels are PROVISIONAL, say so in th
       ~/venvs/py310/bin/python -c "from desk.scenarios import load, describe; [print(describe(s)+'\n') for s in load(open('plans/<day>.json').read())]"
 
 - Fix anything the loader rejects.
+- Post the plan to Slack as a PDF (chart with the levels + every scenario read back):
+
+      ~/venvs/py310/bin/python -m desk.plan_view <day> --slack
+
+  If it reports a Slack problem, mention it in the report; the plan file is still good.
 
 ## 6. Report
 Give the trader: the analysis, the levels table, the scenarios with reasoning, the read-back, and the

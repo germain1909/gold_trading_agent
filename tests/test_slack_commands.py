@@ -104,8 +104,14 @@ def test_generate_saves_next_days_plan_on_confirm():
         assert cmds.ai.args == (date(2026, 10, 15), [31370.0, 30792.0], "watch the weekly low")
         out = os.path.join(tmp, "plans", "2026-10-15.json")
         assert not os.path.exists(out)
-        cmds.handle(ME, "confirm")
-        assert read(out)[0]["mode"] == "paper"
+        drawn = []
+        cmds.chart = lambda day, path: (drawn.append((day, path)), "Posted.")[1]
+        assert cmds.handle(ME, "confirm") == "Posted."                         # saved, then the PDF goes out
+        assert read(out)[0]["mode"] == "paper" and drawn == [(date(2026, 10, 15), out)]
+        assert "Saved `plans/2026-10-15.json`" in said[-2]
+        cmds.chart = lambda day, path: 1 / 0
+        cmds.handle(ME, "generate")
+        assert "Plan saved, but the PDF failed" in cmds.handle(ME, "confirm")    # a PDF problem never loses the plan
 
 
 def test_use_kill_resume_flatten():
@@ -125,6 +131,33 @@ def test_use_kill_resume_flatten():
         assert not cmds.broker.flattened
         cmds.handle(ME, "confirm")
         assert cmds.broker.flattened
+
+
+def test_chart_posts_the_days_plan():
+    with tempfile.TemporaryDirectory() as tmp:
+        cmds, said, _ = setup(tmp)
+        drawn = []
+        cmds.chart = lambda day, path: (drawn.append((day, os.path.basename(path))), "Posted.")[1]
+        assert "no plan for 2026-10-15" in cmds.handle(ME, "chart")            # trading day 10/15 has no file
+        assert cmds.handle(ME, "chart 2026-10-14") == "Posted."
+        assert drawn == [(date(2026, 10, 14), "2026-10-14.json")] and "Drawing" in said[-2]
+
+
+def test_auto_plan_saves_posts_and_never_overwrites():
+    with tempfile.TemporaryDirectory() as tmp:
+        cmds, said, _ = setup(tmp)
+        drawn = []
+        cmds.chart = lambda day, path: (drawn.append(day), "Posted.")[1]
+        cmds.auto_generate(date(2026, 10, 14))                               # the trader's own plan exists
+        assert "Auto-plan skipped" in said[-1] and drawn == []
+        cmds.auto_generate(date(2026, 10, 15))
+        out = os.path.join(tmp, "plans", "2026-10-15.json")
+        assert read(out)[0]["name"] == "Reclaim pdVAL" and drawn == [date(2026, 10, 15)]
+        assert any("Auto plan for Thu 10/15" in m and "Bias neutral." in m for m in said) and said[-1] == "Posted."
+        cmds.ai.draft_plan = lambda day, levels, notes: 1 / 0
+        cmds.auto_generate(date(2026, 10, 16))
+        assert "Auto-plan failed" in said[-1] and "keeps using `2026-10-14.json`" in said[-1]
+        assert not os.path.exists(os.path.join(tmp, "plans", "2026-10-16.json"))
 
 
 def test_invalid_edit_never_reaches_the_file():

@@ -6,3 +6,4 @@ signalrcore
 slack_sdk
 flask
 anthropic
+matplotlib

@@ -11,6 +11,7 @@ change is read back and needs `confirm` before it is written.
     generate [YYYY-MM-DD] [levels...] [notes]
                                Claude drafts a full plan from the market brief (all LIVE)
     use <YYYY-MM-DD>           point the watcher at plans/<date>.json
+    chart [YYYY-MM-DD]         post the plan as a PDF: levels on the chart + every scenario
     kill / resume              kill switch on / off (blocks new live entries)
     flatten                    cancel working orders and close the live position
     confirm / discard          apply or drop the pending change
@@ -30,16 +31,24 @@ from .store import PROJECT_ROOT
 KILL_FILE = os.path.join(PROJECT_ROOT, "data", "KILL")
 
 
+def _post_chart(day: date, path: str) -> str:
+    from .plan_view import plan_picture, render_pdf, post_pdf
+    out = render_pdf(plan_picture(day, path), os.path.splitext(path)[0] + ".pdf")
+    return post_pdf(out, day)
+
+
 class SlackCommands:
     def __init__(self, authorized_user: str, get_plan_path: Callable[[], str], set_plan_path: Callable[[str], None],
                  get_runner: Callable[[], Any], say: Callable[[str], Any], trading_day: Callable[[], date],
-                 ai=None, broker=None, kill_file: str = KILL_FILE, plans_dir: Optional[str] = None):
+                 ai=None, broker=None, kill_file: str = KILL_FILE, plans_dir: Optional[str] = None,
+                 chart: Optional[Callable[[date, str], str]] = None):
         self.user = authorized_user
         self.get_plan_path, self.set_plan_path = get_plan_path, set_plan_path
         self.get_runner, self.say, self.trading_day = get_runner, say, trading_day
         self.ai, self.broker, self.kill_file = ai, broker, kill_file
         self.plans_dir = plans_dir or os.path.join(PROJECT_ROOT, "plans")
         self.pending: Optional[Dict[str, Any]] = None
+        self.chart = chart or _post_chart
 
     # ---------- helpers ----------
 
@@ -122,6 +131,8 @@ class SlackCommands:
             return self._generate(rest)
         if cmd == "use":
             return self._use(rest)
+        if cmd in ("chart", "pdf"):
+            return self._chart(rest)
         if cmd == "kill":
             os.makedirs(os.path.dirname(self.kill_file), exist_ok=True)
             open(self.kill_file, "w").close()
@@ -227,11 +238,53 @@ class SlackCommands:
             if os.path.abspath(path) != os.path.abspath(self.get_plan_path()):
                 msg += (f" The watcher picks it up automatically when the {day} session arms "
                         f"(or `use {day.isoformat()}` to switch now).")
-            return msg + " Use `paper <name>` for any you want on paper."
+            self.say(msg + " Use `paper <name>` for any you want on paper.")
+            try:                                                  # every new plan goes out as a PDF too
+                return self.chart(day, path)
+            except Exception as e:
+                return f":warning: Plan saved, but the PDF failed: {e}. Try `chart {day.isoformat()}`."
         lines = "\n".join(f"• {d['name']} [{d.get('mode', 'paper').upper()}] - {d['type']} {d['side']} at "
                           f"{d.get('level', '-')}" for d in items)
         return self._propose(f"*Draft plan for {day}*{' (replaces the existing file)' if exists else ''}\n"
                              f"{summary}\n\n*Scenarios:*\n{lines}", apply)
+
+    def auto_generate(self, day: date) -> Optional[str]:
+        """
+        The evening auto-plan (run by the watcher): draft, save without confirm, post the summary and PDF.
+        A plan the trader already made for `day` always wins - it is never overwritten.
+        """
+        path = os.path.join(self.plans_dir, f"{day.isoformat()}.json")
+        if os.path.exists(path):
+            return self.say(f":card_index: Auto-plan skipped: you already have `plans/{day.isoformat()}.json` "
+                            f"for {day:%a %m/%d}. `chart {day.isoformat()}` to see it.")
+        if not self.ai:
+            return self.say(":warning: Auto-plan: plan AI isn't available.")
+        self.say(f":robot_face: Auto-plan: drafting the {day:%a %m/%d} plan (market brief + Claude, ~1-2 min)...")
+        try:
+            summary, items = self.ai.draft_plan(day, [], "")
+            self._write(path, items)
+        except Exception as e:
+            return self.say(f":rotating_light: *Auto-plan failed* for {day:%a %m/%d}: {e}\nWithout a new plan the "
+                            f"watcher keeps using `{os.path.basename(self.get_plan_path())}`. Run `generate`, "
+                            f"or `kill` if you don't want to trade it.")
+        modes = sorted({d.get("mode", "paper").upper() for d in items})
+        lines = "\n".join(f"• {d['name']} [{d.get('mode', 'paper').upper()}] - {d['type']} {d['side']} at "
+                          f"{d.get('level', '-')}" for d in items)
+        self.say(f":sunrise: *Auto plan for {day:%a %m/%d}* saved ({len(items)} scenarios, {'/'.join(modes)})\n"
+                 f"{summary}\n\n*Scenarios:*\n{lines}\n\nIt arms when the first 30m candle closes (~18:30 ET). "
+                 f"Before then: `cancel <name>`, `paper <name>`, `add: ...`, `generate` to redo it, or `kill`.")
+        try:
+            return self.say(self.chart(day, path))
+        except Exception as e:
+            return self.say(f":warning: The PDF failed: {e}. Try `chart {day.isoformat()}`.")
+
+    def _chart(self, rest: str) -> str:
+        day = date.fromisoformat(rest.strip()) if rest.strip() else self.trading_day()
+        path = os.path.join(self.plans_dir, f"{day.isoformat()}.json")
+        if not os.path.exists(path):
+            raise ValueError(f"no plan for {day} (plans/{day.isoformat()}.json). `generate` makes one.")
+        self.say(f":hourglass: Drawing the {day} plan...")
+        return self.chart(day, path)
 
     def _use(self, rest: str) -> str:
         day = date.fromisoformat(rest.strip())

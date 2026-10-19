@@ -45,6 +45,9 @@ CLOSE_GRACE_SECONDS = 3         # wait this long past the bucket end for late tr
 LOOP_SECONDS = 2
 STALE_STREAM_SECONDS = 300      # rebuild the connection if nothing arrives for this long
 TOKEN_MAX_AGE_SECONDS = 20 * 3600
+# Evening auto-plan: at this ET time (Sun-Thu) Claude drafts the next session's plan, saves it and posts
+# it with the PDF to Slack - unless plans/<day>.json already exists. AUTO_PLAN_TIME=off disables it.
+AUTO_PLAN_TIME = os.getenv("AUTO_PLAN_TIME", "17:15")
 
 RED = "\033[91m"
 GREEN = "\033[92m"
@@ -131,11 +134,15 @@ class LevelWatcher:
         self.plan_symbol = symbols[0].upper()
         self.runner = None
         self.plan_done = False
-        self.plan_lock = threading.Lock()
+        # Re-entrant: ensure_runner() runs under this lock and may switch to plans/<day>.json, which
+        # reloads the plan under the same lock (a plain Lock deadlocked the watcher on 10/18).
+        self.plan_lock = threading.RLock()
         self.history: List[Dict[str, Any]] = []          # closed 30m candles for the plan symbol, oldest first
         self.notifier = None
         self.broker = None
         self.last_live_poll = 0.0
+        self.commands = None
+        self.auto_plan_day = None                        # the trading day the auto-plan last ran for
         if plan_path:
             from .scenarios import load
             from .slack_notifier import SlackNotifier
@@ -437,6 +444,24 @@ class LevelWatcher:
                 self.plan_done = False
             print(f"{DIM}Plan: ready for the next session - arms when its first candle closes{RESET}")
 
+    def check_auto_plan(self) -> None:
+        """Sun-Thu at AUTO_PLAN_TIME ET (until the 18:00 open): draft and post the next session's plan, once."""
+        if not self.commands or AUTO_PLAN_TIME.lower() in ("off", "false", "0", ""):
+            return
+        from .replay import ET
+        from .plan_runner import trading_day_for
+        now = datetime.now(ET)
+        h, m = (int(x) for x in AUTO_PLAN_TIME.split(":"))
+        if now.weekday() not in (6, 0, 1, 2, 3) or not ((now.hour, now.minute) >= (h, m) and now.hour < 18):
+            return
+        day = trading_day_for(datetime.now(timezone.utc))
+        if self.auto_plan_day == day:
+            return
+        self.auto_plan_day = day
+        print(f"{BOLD}Auto-plan: preparing the {day} plan{RESET}")
+        # Claude takes 1-2 minutes; the main loop keeps polling live positions meanwhile.
+        threading.Thread(target=self.commands.auto_generate, args=(day,), daemon=True).start()
+
     def check_live(self) -> None:
         """Every 5 seconds while a live position is open: has Topstep closed it? Flatten at 16:55 ET."""
         if not self.runner or self.runner.ended or not self.runner.position or not self.runner.position.get("live"):
@@ -519,6 +544,8 @@ class LevelWatcher:
         if self.slack_bot:
             self.slack_bot.start()
             print(f"{BOLD}Slack commands on - type `help` in the channel{RESET}")
+            if AUTO_PLAN_TIME.lower() not in ("off", "false", "0", ""):
+                print(f"{DIM}Auto-plan: Sun-Thu at {AUTO_PLAN_TIME} ET (skipped when plans/<day>.json exists){RESET}")
             self.notifier.send_message(":robot_face: Desk online. Type `help` for commands, `plan` for status.")
         try:
             while True:
@@ -530,6 +557,7 @@ class LevelWatcher:
                 self.check_live()
                 self.check_end_of_day()
                 self.check_new_day()
+                self.check_auto_plan()
                 stale = time.time() - self.last_message_at > STALE_STREAM_SECONDS
                 token_old = time.time() - self.token_at > TOKEN_MAX_AGE_SECONDS
                 if not self.connected or stale or token_old:

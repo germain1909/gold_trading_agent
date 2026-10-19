@@ -10,6 +10,8 @@ Pages:
     /day/<date>       every trigger that day: what the system did and the shadow outcome
     /trade/<id>       one trigger: chart, plan, context, outcome, AI reviews (local or Claude)
     /scorecard        shadow results by scenario type and session (taken or not)
+    /plan             the coming session's plan on the chart (/plan/<date> for another day),
+                      with a PDF download and a button that posts the PDF to Slack
 
 Replays and live runs of the same trigger are shown once (live wins).
 """
@@ -18,7 +20,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, date
 from typing import Dict, Any, List
 
-from flask import Flask, jsonify, render_template_string, request, abort
+from flask import Flask, jsonify, render_template_string, request, abort, redirect, send_file
 
 from . import store
 from .scenarios import TYPES
@@ -58,7 +60,7 @@ button { background:var(--panel); color:var(--text); border:1px solid var(--line
   cursor:pointer; font:inherit } button:hover { border-color:var(--blue) } button:disabled { opacity:.5; cursor:wait }
 .review { white-space:pre-wrap; line-height:1.6 } #chart { height:420px }
 </style></head><body>
-<header><b>Trading Desk</b><a href="/">All trades</a><a href="/days">Days</a><a href="/scorecard">Scorecard</a></header>
+<header><b>Trading Desk</b><a href="/plan">Plan</a><a href="/">All trades</a><a href="/days">Days</a><a href="/scorecard">Scorecard</a></header>
 <main>{{ body|safe }}</main></body></html>"""
 
 
@@ -300,7 +302,106 @@ def scorecard():
 </table></div>{% endfor %}""", sections=sections, n=len(ts))
 
 
+@app.route("/plan")
+def plan_next():
+    from datetime import timezone
+    from .plan_runner import trading_day_for
+    return redirect(f"/plan/{trading_day_for(datetime.now(timezone.utc)).isoformat()}")
+
+
+@app.route("/plan/<day>")
+def plan_view(day):
+    from .plan_view import plan_path_for
+    d = date.fromisoformat(day)
+    exists = os.path.exists(plan_path_for(d))
+    return page(f"Plan {day}", """
+<h1>NQ plan · {{ d.strftime('%a %m/%d/%Y') }}</h1>
+{% if not exists %}<div class="panel dim">No plan file for {{ day }} (<code>plans/{{ day }}.json</code>).
+Make one with <code>generate</code> in Slack or <code>/daily-plan {{ day }}</code>.</div>{% else %}
+<div class="panel"><a href="/plan/{{ day }}.pdf"><button>Download PDF</button></a>
+<button onclick="toSlack()">Send PDF to Slack</button> <span class="dim" id="status"></span></div>
+<div class="panel"><div id="chart" style="height:520px"></div><div class="dim" id="chart-note">Loading candles and levels...</div></div>
+<h2>Scenarios</h2><div id="scenarios"></div>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script>
+const dark = !matchMedia('(prefers-color-scheme: light)').matches;
+const esc = t => String(t).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+fetch('/api/plan/{{ day }}').then(r => r.json()).then(p => {
+  if (p.error) throw new Error(p.error);
+  const chart = LightweightCharts.createChart(document.getElementById('chart'), { height: 520,
+    layout: { background: { color: 'transparent' }, textColor: dark ? '#c9ced8' : '#333' },
+    grid: { vertLines: { color: dark ? '#22262f' : '#eee' }, horzLines: { color: dark ? '#22262f' : '#eee' } },
+    timeScale: { timeVisible: true } });
+  const s = chart.addCandlestickSeries();
+  s.setData(p.candles);
+  const near = p.day_atr * 1.2;
+  for (const [k, v] of Object.entries(p.levels))
+    if ((!k.startsWith('ATR') || k === 'ATR+50%' || k === 'ATR-50%') && Math.abs(v - p.last) <= near)
+      s.createPriceLine({ price: v, color: '#8b92a1', lineWidth: 1, lineStyle: 2,
+                          title: k + (k.startsWith('ATR') && p.estimated ? ' (est)' : '') });
+  for (const it of p.scenarios) {
+    const col = it.side === 'long' ? '#22c55e' : '#ef4444';
+    if (it.level != null) s.createPriceLine({ price: it.level, color: col, lineWidth: 2, lineStyle: 0,
+      title: (it.side === 'long' ? '▲ ' : '▼ ') + it.name + (it.mode === 'live' ? ' · LIVE' : ' · paper') });
+    if (it.target != null) s.createPriceLine({ price: it.target, color: col, lineWidth: 1, lineStyle: 1,
+      title: 'target · ' + it.name });
+  }
+  if (p.session_time) s.setMarkers([{ time: p.session_time, position: 'aboveBar', color: '#f59e0b',
+                                      shape: 'arrowDown', text: 'session open' }]);
+  chart.timeScale().fitContent();
+  document.getElementById('chart-note').textContent = '30m candles, chart time ET. Solid = scenario level ' +
+    '(green long, red short), dotted = named target, gray = context.' +
+    (p.estimated ? ' ATR lines are estimated from the last price until the 18:00 open.' : '');
+  document.getElementById('scenarios').innerHTML = p.scenarios.map(it => `<div class="panel">
+    <b class="${it.side === 'long' ? 'pos' : 'neg'}">${it.side === 'long' ? '▲' : '▼'} ${esc(it.name)}</b>
+    <span class="tag ${it.mode === 'live' ? 'failed' : ''}">${it.mode.toUpperCase()}</span>
+    <span class="dim">${esc(it.type_name)}</span>
+    ${it.error ? `<div class="neg">Not armed: ${esc(it.error)}</div>` : ''}
+    <div class="review dim">${esc(it.text.split('\n').slice(1).join('\n'))}</div></div>`).join('');
+}).catch(err => document.getElementById('chart-note').textContent = 'Could not load the plan: ' + err.message);
+async function toSlack() {
+  const st = document.getElementById('status'); st.textContent = 'Building the PDF and posting...';
+  try { const r = await fetch('/api/plan/{{ day }}/slack', { method: 'POST' }); st.textContent = (await r.json()).message; }
+  catch (err) { st.textContent = 'Failed: ' + err.message; }
+}
+</script>{% endif %}""", d=d, day=day, exists=exists)
+
+
+@app.route("/plan/<day>.pdf")
+def plan_pdf(day):
+    from .plan_view import make_pdf
+    return send_file(make_pdf(date.fromisoformat(day)), mimetype="application/pdf")
+
+
 # ---------- api ----------
+
+@app.route("/api/plan/<day>")
+def plan_data(day):
+    from .plan_view import plan_picture
+    try:
+        p = plan_picture(date.fromisoformat(day))
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+    def et_epoch(iso):
+        dt = datetime.fromisoformat(iso)
+        return int(dt.timestamp() + dt.astimezone(_et()).utcoffset().total_seconds())
+    p["candles"] = [{"time": et_epoch(c["t"]), "open": c["o"], "high": c["h"], "low": c["l"], "close": c["c"]}
+                    for c in p["candles"]]
+    start = et_epoch(p["session_start"])
+    p["session_time"] = next((c["time"] for c in p["candles"] if c["time"] >= start), None)
+    return jsonify(p)
+
+
+@app.route("/api/plan/<day>/slack", methods=["POST"])
+def plan_to_slack(day):
+    from .plan_view import make_pdf, post_pdf
+    d = date.fromisoformat(day)
+    try:
+        return jsonify({"message": post_pdf(make_pdf(d), d)})
+    except Exception as e:
+        return jsonify({"message": f"Failed: {type(e).__name__}: {e}"}), 500
+
 
 @app.route("/api/trade/<int:event_id>/candles")
 def candles(event_id):
