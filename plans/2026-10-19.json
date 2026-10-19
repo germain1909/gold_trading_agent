@@ -1,0 +1,57 @@
+[
+  {
+    "name": "Break below weekly low",
+    "type": "breakout",
+    "side": "short",
+    "level": "pdVAL",
+    "target": "default",
+    "mode": "live"
+  },
+  {
+    "name": "Reclaim weekly low",
+    "type": "reclaim",
+    "side": "long",
+    "level": "pdVAL",
+    "target": "default",
+    "mode": "live"
+  },
+  {
+    "name": "Fade ATR-50% flush",
+    "type": "fade",
+    "side": "long",
+    "level": "ATR-50%",
+    "target": "default",
+    "mode": "live"
+  },
+  {
+    "name": "Fade ATR+50% bounce",
+    "type": "fade",
+    "side": "short",
+    "level": "ATR+50%",
+    "target": "default",
+    "mode": "live"
+  },
+  {
+    "name": "Break above pdVAH",
+    "type": "breakout",
+    "side": "long",
+    "level": "pdVAH",
+    "target": "default",
+    "mode": "live"
+  },
+  {
+    "name": "Trap above pdVAH short to 29670",
+    "type": "trap",
+    "side": "short",
+    "level": "pdVAH",
+    "conditions": [],
+    "session": "any",
+    "until": null,
+    "target": 29670,
+    "stop": "default",
+    "size": null,
+    "rejection": "pattern",
+    "once": true,
+    "mode": "live"
+  }
+]
