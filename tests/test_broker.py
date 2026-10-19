@@ -31,7 +31,8 @@ class FakeSession:
     def post(self, url, headers=None, json=None, timeout=None):
         path = url.split("topstepx.com")[-1] if "topstepx.com" in url else url
         self.calls.append((path, json))
-        return FakeResponse(self.routes.get(path, {"success": True}))
+        r = self.routes.get(path, {"success": True})
+        return FakeResponse(r(json) if callable(r) else r)
 
 
 class FakeClient:
@@ -89,8 +90,8 @@ def test_dryrun_builds_the_bracket_order_but_never_sends_it():
     p = order["payload"]
     assert order["dry"] and "/api/Order/place" not in paths(client)
     assert p["contractId"] == "CON.F.US.MNQ.Z26" and p["size"] == 1 and p["side"] == 0 and p["type"] == 2
-    # long: stop below the fill (negative ticks), target above (positive)
-    assert p["stopLossBracket"] == {"ticks": -40, "type": 4} and p["takeProfitBracket"] == {"ticks": 80, "type": 1}
+    # long: stop below the fill (negative ticks), target above (positive); the stop carries the 4-tick pad
+    assert p["stopLossBracket"] == {"ticks": -44, "type": 4} and p["takeProfitBracket"] == {"ticks": 80, "type": 1}
     assert "DRY RUN" in slack.sent[-1]
 
 
@@ -99,7 +100,7 @@ def test_short_bracket_ticks_are_signed_the_other_way():
     b, _, _ = make("dryrun")
     p = b.enter("short", 30960.75, 30987.0, 30792.0, "Support breaks VAL 10/8")["payload"]
     assert p["side"] == 1
-    assert p["takeProfitBracket"]["ticks"] == -675 and p["stopLossBracket"]["ticks"] == 105
+    assert p["takeProfitBracket"]["ticks"] == -675 and p["stopLossBracket"]["ticks"] == 109
 
 
 def test_live_places_one_bracketed_order():
@@ -108,7 +109,7 @@ def test_live_places_one_bracketed_order():
     assert order["orderId"] == 9056 and b.trades_today == 1
     placed = [j for p, j in client._session.calls if p == "/api/Order/place"][0]
     assert placed["side"] == 1 and placed["size"] == 1
-    assert placed["stopLossBracket"] == {"ticks": 40, "type": 4}         # short: stop above (+)
+    assert placed["stopLossBracket"] == {"ticks": 44, "type": 4}         # short: stop above (+), padded
     assert placed["takeProfitBracket"] == {"ticks": -80, "type": 1}      # short: target below (-)
 
 
@@ -171,6 +172,58 @@ def test_flatten_cancels_orders_and_closes_the_position():
     calls = paths(client)
     assert "/api/Order/cancel" in calls and "/api/Position/closeContract" in calls
     assert "Flattened" in slack.sent[-1]
+
+
+def bracket_broker(fill, stop_price, modify_ok=True):
+    """A filled position with its bracket working; /api/Order/modify really changes the orders."""
+    orders = [{"id": 11, "contractId": MNQ["id"], "type": 4, "stopPrice": stop_price},
+              {"id": 12, "contractId": MNQ["id"], "type": 1, "limitPrice": 30655.0}]
+
+    def modify(j):
+        if not modify_ok:
+            return {"success": False, "errorMessage": "rejected"}
+        o = next(o for o in orders if o["id"] == j["orderId"])
+        o.update({k: j[k] for k in ("stopPrice", "limitPrice") if k in j})
+        return {"success": True}
+    b, client, slack = make("true")
+    client._session.routes["/api/Order/searchOpen"] = lambda j: {"success": True, "orders": orders}
+    client._session.routes["/api/Order/modify"] = modify
+    return b, client, slack, {"averagePrice": fill, "size": 1, "contractId": MNQ["id"]}, orders
+
+
+# 10/13 weekly-low short: planned entry 30782.25, stop 30794 (level 30792 + 2), target 30719.
+TEN_13 = {"planned": {"side": "short", "entry": 30782.25, "stop": 30794.0, "target": 30719.0}}
+
+
+def test_bracket_is_moved_to_the_planned_prices_after_slippage():
+    # Filled 2 pts low: the padded stop (47 + 4 ticks from the fill) sits at 30793 - move it to 30794.
+    b, client, slack, pos, orders = bracket_broker(30780.25, 30793.0)
+    info = b.correct_bracket(TEN_13, pos)
+    assert info["status"] == "corrected" and info["slippage"] == 2.0
+    assert "2 pts worse than planned" in slack.sent[-1]
+    assert orders[0]["stopPrice"] == 30794.0 and orders[1]["limitPrice"] == 30719.0
+    assert "Bracket set to the plan" in slack.sent[-1]
+
+
+def test_bracket_waits_until_the_orders_show_up():
+    b, client, slack, pos, orders = bracket_broker(30780.25, 30793.0)
+    orders.clear()
+    assert b.correct_bracket(TEN_13, pos) is None and "/api/Order/modify" not in paths(client)
+
+
+def test_bracket_kept_when_slippage_breaks_the_risk_rules():
+    # Filled 20 pts low: from 30762.25 the planned stop is 31.75 pts away -> target only 1.36R.
+    b, client, slack, pos, orders = bracket_broker(30762.25, 30775.0)
+    info = b.correct_bracket(TEN_13, pos)
+    assert info["status"] == "kept" and "R <" in info["note"]
+    assert orders[0]["stopPrice"] == 30775.0 and "/api/Order/modify" not in paths(client)
+
+
+def test_failed_modify_leaves_the_padded_stop_working():
+    b, client, slack, pos, orders = bracket_broker(30780.25, 30793.0, modify_ok=False)
+    info = b.correct_bracket(TEN_13, pos)
+    assert info["status"] == "failed" and orders[0]["stopPrice"] == 30793.0
+    assert "padded stop" in slack.sent[-1]
 
 
 if __name__ == "__main__":

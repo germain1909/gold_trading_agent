@@ -40,6 +40,11 @@ LIVE_SYMBOL = "MNQ"
 KILL_FILE = os.path.join(PROJECT_ROOT, "data", "KILL")
 MIN_STOP_TICKS = 8                 # 2 points: refuse absurdly tight stops
 MAX_RISK_USD = 250                 # per trade, same as the strategy's cap
+MIN_RR = 1.5                       # same minimum as the strategy
+# Bracket ticks are offsets from the fill, so slippage drags the stop with it (10/13: the stop
+# landed exactly on the broken level). The bracket goes out with this pad on the stop, and
+# correct_bracket() then moves stop and target to the planned prices once the fill is known.
+STOP_PAD_TICKS = int(os.getenv("LIVE_STOP_PAD_TICKS", 4))
 
 ORDER_MARKET, ORDER_LIMIT, ORDER_STOP = 2, 1, 4
 SIDE_BUY, SIDE_SELL = 0, 1
@@ -47,6 +52,10 @@ SIDE_BUY, SIDE_SELL = 0, 1
 
 class BrokerError(RuntimeError):
     pass
+
+
+def _px(p) -> str:
+    return "?" if p is None else f"{float(p):,.2f}"
 
 
 class LiveBroker:
@@ -191,6 +200,7 @@ class LiveBroker:
         # long -> target above (+), stop below (-); short -> target below (-), stop above (+).
         # (Unsigned ticks were rejected live: "Ticks should be less than zero when going short.")
         direction = 1 if side == "long" else -1
+        sent_stop_ticks = stop_ticks + STOP_PAD_TICKS        # corrected to the planned price after the fill
         payload = {
             "accountId": self.account_id,
             "contractId": self.contract,
@@ -201,16 +211,17 @@ class LiveBroker:
             "stopPrice": None,
             "trailPrice": None,
             "customTag": f"{tag[:40]}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
-            "stopLossBracket": {"ticks": -direction * stop_ticks, "type": ORDER_STOP},
+            "stopLossBracket": {"ticks": -direction * sent_stop_ticks, "type": ORDER_STOP},
             "takeProfitBracket": {"ticks": direction * target_ticks, "type": ORDER_LIMIT},
         }
         summary = (f"{side.upper()} {self.size} {self.contract_name} market, stop {stop_ticks} ticks "
-                   f"(-${risk_usd:,.0f}), target {target_ticks} ticks")
+                   f"(-${risk_usd:,.0f}) +{STOP_PAD_TICKS} pad until the fill, target {target_ticks} ticks")
+        planned = {"side": side, "entry": ref_price, "stop": stop, "target": target}
         if not self.live:
             self.notifier.send_message(f":test_tube: DRY RUN - would send: {summary}\n```{payload}```")
             print(f"DRY RUN order: {payload}")
             self.trades_today += 1
-            return {"dry": True, "payload": payload, "summary": summary}
+            return {"dry": True, "payload": payload, "summary": summary, "planned": planned}
         try:
             data = self._post("/api/Order/place", payload)
         except Exception as e:
@@ -219,7 +230,66 @@ class LiveBroker:
             return None
         self.trades_today += 1
         return {"dry": False, "orderId": data.get("orderId"), "payload": payload, "summary": summary,
-                "placed_at": datetime.now(timezone.utc)}
+                "planned": planned, "placed_at": datetime.now(timezone.utc)}
+
+    def _round(self, price: float) -> float:
+        return round(round(price / self.tick) * self.tick, 2)
+
+    def correct_bracket(self, order: Dict[str, Any], position: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        After the fill, move the bracket's stop and target to the planned prices.
+        Returns None if the bracket orders aren't visible yet (call again), else what happened:
+        {"status": "corrected" | "kept" | "failed", "fill", "stop", "target", "note"}.
+        On "kept" or "failed" the padded bracket from the fill stays in place - never unprotected.
+        """
+        plan = order.get("planned") or {}
+        long = plan.get("side") == "long"
+        fill = float(position.get("averagePrice") or 0)
+        orders = self.open_orders()
+        stop_o = next((o for o in orders if o.get("type") == ORDER_STOP), None)
+        target_o = next((o for o in orders if o.get("type") == ORDER_LIMIT), None)
+        if not fill or not stop_o:
+            return None
+        stop, target = self._round(plan["stop"]), self._round(plan["target"])
+        # slippage > 0 = filled worse than the planned entry
+        out = {"fill": fill, "slippage": round((fill - plan["entry"]) * (1 if long else -1), 2),
+               "padded_stop": stop_o.get("stopPrice"), "stop": stop, "target": target}
+
+        risk_ticks = round(((fill - stop) if long else (stop - fill)) / self.tick)
+        reward_ticks = round(((target - fill) if long else (fill - target)) / self.tick)
+        risk_usd = risk_ticks * self.tick_value * self.size
+        keep = None
+        if risk_ticks < MIN_STOP_TICKS:
+            keep = f"the planned stop {_px(stop)} is only {risk_ticks} ticks from the fill {_px(fill)}"
+        elif risk_usd > MAX_RISK_USD:
+            keep = f"from the fill {_px(fill)} the planned stop risks ${risk_usd:,.0f} > ${MAX_RISK_USD}"
+        elif reward_ticks / risk_ticks < MIN_RR:
+            keep = f"from the fill {_px(fill)} the planned stop/target is {reward_ticks / risk_ticks:.2f}R < {MIN_RR}R"
+        if keep:
+            self.notifier.send_message(f":warning: Bracket kept as filled (stop {_px(out['padded_stop'])}): {keep}")
+            return {**out, "status": "kept", "note": keep}
+
+        try:
+            if stop_o.get("stopPrice") != stop:
+                self._post("/api/Order/modify", {"accountId": self.account_id, "orderId": stop_o["id"],
+                                                 "stopPrice": stop})
+            if target_o and target_o.get("limitPrice") != target:
+                self._post("/api/Order/modify", {"accountId": self.account_id, "orderId": target_o["id"],
+                                                 "limitPrice": target})
+            now = {o["id"]: o for o in self.open_orders()}
+            got_stop = (now.get(stop_o["id"]) or {}).get("stopPrice")
+            if got_stop != stop:
+                raise BrokerError(f"stop reads {got_stop} after the modify")
+        except Exception as e:
+            note = f"{e}"
+            self.notifier.send_message(f":rotating_light: Couldn't move the stop to {_px(stop)} - the padded stop "
+                                       f"{_px(out['padded_stop'])} is still working. ({note})")
+            return {**out, "status": "failed", "note": note}
+        slip = out["slippage"]
+        how = f"{abs(slip):g} pts {'worse' if slip > 0 else 'better'} than planned" if slip else "as planned"
+        self.notifier.send_message(f":dart: Filled {_px(fill)} ({how}). Bracket set to the "
+                                   f"plan: stop {_px(stop)}, target {_px(target)} (-${risk_usd:,.0f}).")
+        return {**out, "status": "corrected", "note": ""}
 
     def flatten(self, reason: str) -> None:
         """Cancel working MNQ orders and close any MNQ position."""

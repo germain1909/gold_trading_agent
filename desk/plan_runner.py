@@ -282,6 +282,8 @@ class PlanRunner:
             return
         if open_now:
             pos["seen_open"] = True
+            if pos.get("bracket") is None:
+                self._correct_bracket(pos, open_now)
             return
         placed = pos["order"]["placed_at"]
         if not pos["seen_open"] and (datetime.now(placed.tzinfo) - placed).total_seconds() < 20:
@@ -295,6 +297,31 @@ class PlanRunner:
             fill, pnl = None, None
         exit_price = float(fill["price"]) if fill else (self.last_price or pos["plan"]["entry"])
         self._close(exit_price, "closed on Topstep", pnl_usd=pnl)
+
+    BRACKET_TRIES = 6           # polls (~5s apart) to wait for the bracket orders to show up after the fill
+
+    def _correct_bracket(self, pos: Dict[str, Any], open_now: Dict[str, Any]) -> None:
+        """Once filled, move the stop/target from 'offset from the fill' to the planned prices."""
+        pos["bracket_tries"] = pos.get("bracket_tries", 0) + 1
+        try:
+            info = self.broker.correct_bracket(pos["order"], open_now)
+        except Exception as e:
+            info = {"status": "failed", "note": str(e)}
+        if info is None:
+            if pos["bracket_tries"] < self.BRACKET_TRIES:
+                return
+            info = {"status": "failed", "note": "bracket orders not visible after the fill"}
+            self.notifier.send_message(":rotating_light: Couldn't find the bracket stop after the fill - "
+                                       "check the position in TopstepX.")
+        pos["bracket"] = info
+        self._say(f"{YELLOW}Bracket {info['status']}: stop {info.get('stop')}, fill {info.get('fill')}"
+                  f"{' - ' + info['note'] if info.get('note') else ''}{RESET}")
+        if pos.get("event_id"):
+            try:
+                entry = store.event(pos["event_id"])
+                store.update_event_result(pos["event_id"], {**(entry or {}).get("result", {}), "bracket": info})
+            except Exception as e:
+                self._say(f"{RED}journal update failed: {e}{RESET}")
 
     def _close(self, exit_price: float, how: str, pnl_usd: Optional[float] = None) -> None:
         pos, p = self.position, self.position["plan"]

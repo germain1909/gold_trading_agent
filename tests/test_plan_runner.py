@@ -96,6 +96,44 @@ def test_warmup_updates_memory_without_trading():
     assert runner.position is not None and kinds(slack) == ["send_session_started", "send_trade_entered"]
 
 
+class FakeLiveBroker:
+    """Position stays open; the bracket orders show up on the third poll."""
+    def __init__(self, ready_after=3):
+        self.calls, self.ready_after = 0, ready_after
+
+    def open_position(self):
+        return {"averagePrice": 101.5, "size": 1}
+
+    def correct_bracket(self, order, position):
+        self.calls += 1
+        return {"status": "corrected", "stop": 96.0, "fill": 101.5} if self.calls >= self.ready_after else None
+
+
+def live_position(runner, broker):
+    from datetime import datetime, timezone
+    runner.broker = broker
+    runner.position = {"scenario": "x", "mode": "live", "live": True, "seen_open": False, "entry_time": None,
+                       "order": {"placed_at": datetime.now(timezone.utc), "planned": {}},
+                       "plan": {"side": "long", "entry": 102, "stop": 96, "target": 120, "contracts": 1}}
+
+
+def test_live_bracket_is_corrected_once_after_the_fill():
+    runner, _, _ = make([RECLAIM])
+    live_position(runner, FakeLiveBroker())
+    for _ in range(5):
+        runner.poll_live()
+    assert runner.broker.calls == 3 and runner.position["bracket"]["status"] == "corrected"
+
+
+def test_live_bracket_gives_up_and_says_so():
+    runner, _, slack = make([RECLAIM])
+    live_position(runner, FakeLiveBroker(ready_after=99))
+    for _ in range(10):
+        runner.poll_live()
+    assert runner.broker.calls == PlanRunner.BRACKET_TRIES and runner.position["bracket"]["status"] == "failed"
+    assert any(k == "send_message" and "bracket stop" in a[0] for k, a in slack.sent)
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in globals().items() if n.startswith("test_")]
     for name, fn in tests:
